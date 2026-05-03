@@ -6,10 +6,36 @@ import sys
 import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Hermetic user-corrections path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def user_corrections_path(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Point ``USER_CORRECTIONS_PATH`` at a per-test tmp path.
+
+    Otherwise, a real file at ``~/.config/podcast_transcript/corrections.toml``
+    (left over from manual ``add-correction`` runs by the developer) would
+    leak into tests and could change behaviour.
+    """
+    target = tmp_path_factory.mktemp("user-corrections") / "corrections.toml"
+    monkeypatch.setattr("podcast_transcript.cli.USER_CORRECTIONS_PATH", target)
+    monkeypatch.setattr("podcast_transcript.corrections_user.USER_CORRECTIONS_PATH", target)
+    return target
+
 
 # ---------------------------------------------------------------------------
 # Whisper mocking

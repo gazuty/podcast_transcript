@@ -1,0 +1,156 @@
+"""Minimal stdlib-only RSS-2.0 feed parser for podcast feeds.
+
+Why stdlib over ``feedparser``: the rest of the package is zero-dep at
+runtime, and we only need three fields (title, enclosure URL, optional
+pubDate) to power the ``run`` subcommand. ``xml.etree.ElementTree`` parses
+the namespaces correctly and is fast enough for any feed under ~10 MB.
+
+This is a deliberately narrow parser:
+
+- Only RSS 2.0 ``<rss><channel><item>`` is recognised — Atom feeds raise.
+- Items missing an ``<enclosure url=…>`` are skipped (they aren't audio
+  episodes).
+- ``itunes:title`` and similar extensions are ignored; we read plain
+  ``<title>`` and ``<pubDate>``.
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+from dataclasses import dataclass
+from io import BytesIO
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+from xml.etree import ElementTree as ET  # community-standard alias
+
+from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError
+
+__all__ = [
+    "FeedItem",
+    "FeedParseError",
+    "fetch_feed",
+    "load_feed",
+    "parse_feed",
+    "select_item",
+]
+
+
+class FeedParseError(Exception):
+    """Raised when the bytes do not look like an RSS-2.0 feed we can read."""
+
+
+@dataclass(frozen=True)
+class FeedItem:
+    """A single ``<item>`` from an RSS feed (only the fields we need)."""
+
+    title: str
+    enclosure_url: str
+    pub_date: str | None = None
+
+
+def fetch_feed(
+    url: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    user_agent: str = DEFAULT_USER_AGENT,
+    max_bytes: int = 10 * 1024 * 1024,
+) -> bytes:
+    """Fetch the raw bytes of an RSS feed via ``urllib``.
+
+    Caps the response at *max_bytes* (default 10 MiB) to avoid pathological
+    responses chewing through memory. Restricts URL schemes to http/https.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Only http(s) URLs are supported, got scheme {parsed.scheme!r}")
+    request = Request(url, headers={"User-Agent": user_agent})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            buf = BytesIO()
+            shutil.copyfileobj(response, buf, length=64 * 1024)
+            data = buf.getvalue()
+    except HTTPError as exc:
+        raise DownloadError(f"HTTP {exc.code} fetching {url!r}: {exc.reason}") from exc
+    except URLError as exc:
+        raise DownloadError(f"Network error fetching {url!r}: {exc.reason}") from exc
+    if len(data) > max_bytes:
+        raise DownloadError(f"feed body too large: {len(data)} > {max_bytes}")
+    return data
+
+
+def parse_feed(xml_bytes: bytes) -> list[FeedItem]:
+    """Parse RSS-2.0 bytes into a list of :class:`FeedItem` in feed order.
+
+    Items without an ``<enclosure url=…>`` attribute are skipped silently —
+    those are typically blog-only items mixed into a podcast feed.
+    """
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        raise FeedParseError(f"could not parse XML: {exc}") from exc
+
+    if root.tag.lower() != "rss":
+        raise FeedParseError(
+            f"expected an <rss> root element, got <{root.tag}>; Atom feeds are not supported",
+        )
+
+    channel = root.find("channel")
+    if channel is None:
+        raise FeedParseError("RSS feed has no <channel> element")
+
+    items: list[FeedItem] = []
+    for item_el in channel.findall("item"):
+        enclosure = item_el.find("enclosure")
+        if enclosure is None:
+            continue
+        url = enclosure.get("url", "").strip()
+        if not url:
+            continue
+        title_el = item_el.find("title")
+        title = (title_el.text or "").strip() if title_el is not None else ""
+        pub_el = item_el.find("pubDate")
+        pub_date = (pub_el.text or "").strip() if pub_el is not None and pub_el.text else None
+        items.append(FeedItem(title=title, enclosure_url=url, pub_date=pub_date))
+
+    return items
+
+
+def load_feed(
+    url: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> list[FeedItem]:
+    """Convenience wrapper: fetch and parse in one call."""
+    return parse_feed(fetch_feed(url, timeout=timeout))
+
+
+def select_item(
+    items: list[FeedItem],
+    *,
+    regex: str | None = None,
+    index: int | None = None,
+) -> FeedItem:
+    """Pick a single item by title regex (first match) or 0-based index.
+
+    Exactly one of *regex* or *index* must be provided. *regex* is matched
+    against ``FeedItem.title`` with :func:`re.search` (case-insensitive). If
+    both are passed, *regex* wins; if neither is passed, ``ValueError`` is
+    raised.
+    """
+    if not items:
+        raise ValueError("feed has no items with audio enclosures")
+    if regex is not None:
+        compiled = re.compile(regex, re.IGNORECASE)
+        for item in items:
+            if compiled.search(item.title):
+                return item
+        raise ValueError(f"no item title matches regex {regex!r}")
+    if index is not None:
+        if index < 0 or index >= len(items):
+            raise ValueError(
+                f"episode index {index} out of range (feed has {len(items)} items)",
+            )
+        return items[index]
+    raise ValueError("must pass exactly one of regex= or index=")

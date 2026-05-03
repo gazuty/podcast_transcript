@@ -1,0 +1,33 @@
+# Corrections specific to Razib Khan's "Unsupervised Learning" podcast.
+#
+# Use with `podcast-transcript clean --corrections-pack razib_khan` (or via
+# the `run` subcommand). Layers on top of the general `corrections.toml`.
+#
+# Verified entries live in [corrections] and are applied silently. Candidate
+# corrections that need a human eye go in [uncertain] — every match is
+# wrapped as `[?: original → suggested]` in the output, so you can grep,
+# review, and promote them with `podcast-transcript add-correction`.
+
+[corrections]
+# Host name. Whisper splits on the long ‘ee’ vowel.
+"Razeeb" = "Razib"
+"razeeb" = "razib"
+# Lead author of Akbari et al. 2026 (Nature). Whisper inserts a phantom 'h'.
+"Akhbari" = "Akbari"
+# Geographic mishearing.
+"Aeneid subcontinent" = "Indian subcontinent"
+# Pigmentation gene — letters transposed.
+"BCN2" = "BNC2"
+# Preprint server.
+"bioarchive" = "bioRxiv"
+
+[uncertain]
+# Reich-collaborator statistical geneticist; surname likely "Gazal" (USC).
+# Verify against the Akbari et al. 2026 author list before promoting.
+"Stephen Ghazal" = "Stephen Gazal"
+# Probable: Alissa Mittnik (ancient-DNA, Reich/MPI). Confirm spelling and
+# given name from the paper before promoting.
+"Alyssa Mitnick" = "Alissa Mittnik"
+# Whisper hallucination in an ABO blood-typing aside; intended term unclear.
+# Leaving the suggestion blank flags occurrences without proposing a fix.
+"benorephora" = ""

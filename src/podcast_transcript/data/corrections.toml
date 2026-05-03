@@ -1,16 +1,43 @@
 # Default corrections applied by `podcast-transcript clean`.
 #
-# Each entry is `wrong = right`. Matching is word-bounded and case-sensitive.
-# Add entries for terms Whisper recurrently mistranscribes in your domain.
-# Keep the bar high — only add corrections you're confident about.
+# Two tables:
+#   [corrections]  silent word-bounded replacements; only add if you're
+#                  confident the wrong → right mapping is correct in
+#                  every plausible context that could appear in a podcast
+#                  transcript.
+#   [uncertain]    annotates matches inline as `[?: wrong → suggestion]`
+#                  (or `[?: wrong]` if suggestion is empty). Use this for
+#                  fixes that need a human review before being applied.
+#
+# Matching is word-bounded and case-sensitive in both tables.
 
 [corrections]
-# Population genetics — standard terms Whisper consistently mishears.
+# Population genetics — recurring Whisper mishearings.
 "Tehima's D" = "Tajima's D"
 "Tehima" = "Tajima"
 "right Fisher controversy" = "Wright-Fisher controversy"
 "right Fisher" = "Wright-Fisher"
 "Sewell Wright" = "Sewall Wright"
-
-# Common phrases.
 "Akbar Yadal" = "Akbari et al."
+
+# AI / ML podcasts — high-confidence proper-name fixes.
+"Cloth Code" = "Claude Code"
+"OpenClaw" = "opencode"
+"open CLAW" = "opencode"
+"regentic engineering" = "agentic engineering"
+"regentic engineer" = "agentic engineer"
+"regentic" = "agentic"
+"AISent" = "AI Ascent"
+
+[uncertain]
+# Author names — `Andre`/`Andrey` alone are legitimate spellings for many
+# people, so flag only when paired with `Karpathy` (the most common
+# Whisper failure mode for this guest).
+"Andre Karpathy" = "Andrej Karpathy"
+"Andrey Karpathy" = "Andrej Karpathy"
+
+# Likely-wrong but context-dependent words. Flag for human review rather
+# than silently rewriting.
+"training teams" = "training nets"
+"micro GPT" = "nanoGPT"
+"agentic coherent workflow" = "agentic coding workflow"

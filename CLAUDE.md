@@ -5,14 +5,19 @@ Guidance for Claude (and other AI assistants) working in this repository.
 ## What this repo is
 
 A small, local-only podcast download, transcription, and transcript-cleanup
-tool for Apple Silicon Macs. It exposes a `podcast-transcript` CLI with three
+tool for Apple Silicon Macs. It exposes a `podcast-transcript` CLI with five
 subcommands:
 
 - `download` — fetch a podcast MP3 from a direct URL.
 - `transcribe` — run OpenAI Whisper on a local audio file and write outputs
   (`.txt`, `.srt`, `.vtt`, `.tsv`, `.json`) to `./transcripts/`.
 - `clean` — apply rule-based fixes to a Whisper transcript (loop collapse,
-  outro stripping, term corrections, optional paragraph reflow).
+  outro stripping, preview-cut detection, term corrections + inline
+  uncertainty annotations, optional paragraph reflow).
+- `add-correction` — append/update an entry in the per-user corrections
+  TOML at `~/.config/podcast_transcript/corrections.toml`.
+- `run` — end-to-end pipeline: download (or pick from RSS) → transcribe →
+  ad-strip → clean → write `<slug>_clean.txt`.
 
 Audio processing is intended to run on the user's Mac, **never** in GitHub
 Actions. CI exists only for lint/type-check/tests/shellcheck.
@@ -25,19 +30,25 @@ Actions. CI exists only for lint/type-check/tests/shellcheck.
 ├── src/
 │   └── podcast_transcript/
 │       ├── __init__.py
-│       ├── __main__.py       # `python -m podcast_transcript`
-│       ├── cli.py            # argparse entry point (also wired to console_scripts)
-│       ├── clean.py          # rule-based transcript cleanup
-│       ├── download.py       # stdlib-only HTTP download with validation
-│       ├── transcribe.py     # Lazy-imported whisper wrapper
-│       ├── py.typed          # PEP 561 marker
+│       ├── __main__.py              # `python -m podcast_transcript`
+│       ├── cli.py                   # argparse entry point (also wired to console_scripts)
+│       ├── clean.py                 # rule-based transcript cleanup
+│       ├── corrections_user.py      # per-user corrections file + bundled packs
+│       ├── download.py              # stdlib-only HTTP download with validation
+│       ├── feed.py                  # stdlib-only RSS-2.0 parser (xml.etree)
+│       ├── pipeline.py              # end-to-end `run` orchestration
+│       ├── transcribe.py            # lazy-imported whisper wrapper
+│       ├── py.typed                 # PEP 561 marker
 │       └── data/
-│           └── corrections.toml   # bundled corrections dictionary
+│           ├── corrections.toml             # general defaults
+│           └── corrections.razib_khan.toml  # podcast-specific pack
 ├── tests/
-│   ├── conftest.py           # fake_whisper fixture, in-process http_server fixture
+│   ├── conftest.py                  # fake_whisper, http_server, autouse user-corrections isolation
 │   ├── test_clean.py
 │   ├── test_cli.py
 │   ├── test_download.py
+│   ├── test_feed.py
+│   ├── test_pipeline.py
 │   └── test_transcribe.py
 ├── scripts/
 │   └── setup.sh              # brew install + venv + `pip install -e .[whisper,dev]`
@@ -57,7 +68,9 @@ source venv/bin/activate
 # Use the CLI
 podcast-transcript download <url> <stem>
 podcast-transcript transcribe <file.mp3> [--model turbo]
-podcast-transcript clean <transcript.txt> [--reflow]
+podcast-transcript clean <transcript.txt> [--corrections-pack razib_khan] [--reflow]
+podcast-transcript add-correction <wrong> <right> [--uncertain]
+podcast-transcript run --url <url> --slug <stem> [--corrections-pack razib_khan]
 
 # Dev loop
 ruff check .                 # lint
@@ -105,7 +118,7 @@ so `urlopen` can't be coerced into reading local files.
 
 ### `clean.py` is intentionally rule-based, no LLM.
 
-Four composable passes — each is a pure function, easy to read, easy to
+Five composable passes — each is a pure function, easy to read, easy to
 test, free, and deterministic:
 
 1. **Loop collapser** — `difflib.SequenceMatcher` ratio against a run-leader;
@@ -114,16 +127,37 @@ test, free, and deterministic:
    sentence-final punctuation OR ≥30 chars) and drop everything after it.
    Walking from the end gives up too early when a fragment like `"you"` sits
    between real content and script-mismatch outro junk.
-3. **Corrections** — word-bounded regex substitutions from a TOML file.
-   Defaults ship at `data/corrections.toml`; users extend with
-   `--corrections my.toml`. Bundled via hatchling and loaded via
-   `importlib.resources`.
-4. **Paragraph reflow** (opt-in) — collapse Whisper's per-segment lines into
+3. **Preview-cut detector** — scan the last 5 % of non-empty lines for a
+   small set of paywall phrases (`subscribe to hear`, `to hear the rest`,
+   `head over to … .substack.com`, etc.). Emits a `WARNING` log line when
+   matched but does not modify the transcript.
+4. **Corrections + uncertain annotator** — word-bounded regex substitutions
+   from one or more TOML files. Each file may contribute `[corrections]`
+   (silent replacements) and `[uncertain]` (annotated inline as
+   `[?: original → suggested]`). Layering order: bundled defaults →
+   `--corrections-pack` → per-user file → explicit `--corrections`.
+5. **Paragraph reflow** (opt-in) — collapse Whisper's per-segment lines into
    prose paragraphs of N sentences each.
 
 If you reach for an LLM-based polish pass later, add it as an *optional*
 extra (mirror the `whisper` extra pattern) so the rule-based pipeline stays
 zero-dep.
+
+### `pipeline.py` orchestrates the end-to-end `run` subcommand.
+
+`run_pipeline` chains download → transcribe → ad-strip → clean and writes
+`<transcripts_dir>/<slug>_clean.txt` next to the raw whisper output. The
+ad-strip step uses repeatable `--strip-before` / `--strip-after` regex
+flags; `--strip-after` only fires when the match lands in the tail half of
+the transcript, so an outro phrase that happens to occur naturally
+mid-show doesn't chop the body.
+
+### `feed.py` is a deliberately narrow RSS-2.0 parser.
+
+Stdlib `xml.etree.ElementTree`, no `feedparser` dep. Only reads `<title>`,
+`<enclosure url=…>`, and `<pubDate>`. Atom feeds raise `FeedParseError`.
+Items missing an enclosure are skipped silently. Capped at 10 MiB to avoid
+pathological responses chewing memory.
 
 ## Conventions
 

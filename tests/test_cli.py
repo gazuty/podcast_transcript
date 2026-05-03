@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -12,7 +13,6 @@ from podcast_transcript.download import DownloadError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
     from unittest.mock import MagicMock
 
     from .conftest import Responder
@@ -145,3 +145,114 @@ def test_cli_clean_in_place(tmp_path: Path) -> None:
 def test_cli_clean_missing_input_returns_2(tmp_path: Path) -> None:
     rc = main(["clean", str(tmp_path / "nope.txt")])
     assert rc == 2
+
+
+def test_cli_clean_with_corrections_pack(tmp_path: Path) -> None:
+    src = tmp_path / "in.txt"
+    src.write_text("Razeeb said hello.\nStephen Ghazal joined the team.\n", encoding="utf-8")
+
+    rc = main(
+        [
+            "clean",
+            str(src),
+            "--corrections-pack",
+            "razib_khan",
+            "--no-default-corrections",
+        ]
+    )
+    assert rc == 0
+    cleaned = (tmp_path / "in.txt.clean").read_text(encoding="utf-8")
+    assert "Razib said hello." in cleaned
+    assert "[?: Stephen Ghazal → Stephen Gazal]" in cleaned
+
+
+def test_cli_clean_unknown_pack_returns_2(tmp_path: Path) -> None:
+    src = tmp_path / "in.txt"
+    src.write_text("hello\n", encoding="utf-8")
+    rc = main(["clean", str(src), "--corrections-pack", "no-such-pack"])
+    assert rc == 2
+
+
+def test_cli_add_correction_writes_user_file(user_corrections_path: Path) -> None:
+    rc = main(["add-correction", "Razeeb", "Razib"])
+    assert rc == 0
+    assert user_corrections_path.is_file()
+    content = user_corrections_path.read_text(encoding="utf-8")
+    assert '"Razeeb" = "Razib"' in content
+    assert "[uncertain]" in content
+
+
+def test_cli_add_correction_uncertain_with_blank(user_corrections_path: Path) -> None:
+    rc = main(["add-correction", "benorephora", "--uncertain"])
+    assert rc == 0
+    content = user_corrections_path.read_text(encoding="utf-8")
+    assert '"benorephora" = ""' in content
+
+
+def test_cli_add_correction_rejects_blank_confident(user_corrections_path: Path) -> None:
+    rc = main(["add-correction", "foo"])
+    assert rc == 2
+
+
+def test_cli_add_correction_demotes_then_promotes(user_corrections_path: Path) -> None:
+    main(["add-correction", "foo", "bar"])
+    main(["add-correction", "foo", "baz", "--uncertain"])
+    content = user_corrections_path.read_text(encoding="utf-8")
+    assert '"foo" = "baz"' in content
+    # Confident table should no longer carry the entry.
+    assert content.count('"foo"') == 1
+
+
+def test_cli_clean_picks_up_user_file(
+    tmp_path: Path,
+    user_corrections_path: Path,
+) -> None:
+    main(["add-correction", "fnord", "FNORD"])
+    src = tmp_path / "in.txt"
+    src.write_text("the fnord is everywhere.\n", encoding="utf-8")
+    rc = main(["clean", str(src)])
+    assert rc == 0
+    cleaned = (tmp_path / "in.txt.clean").read_text(encoding="utf-8")
+    assert "FNORD" in cleaned
+
+
+def test_cli_run_url_mode(
+    tmp_path: Path,
+    http_server: Callable[[Responder], str],
+    fake_whisper: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_url = http_server(_audio_responder())
+    transcripts_dir = tmp_path / "transcripts"
+    transcripts_dir.mkdir()
+
+    def writer_factory(fmt: str, _out_dir: str) -> object:
+        def write(_result: object, audio_path: str) -> None:
+            stem = Path(audio_path).stem
+            (transcripts_dir / f"{stem}.{fmt}").write_text(
+                "Razeeb here.\nbody.\n", encoding="utf-8"
+            )
+
+        return write
+
+    fake_whisper.utils.get_writer.side_effect = writer_factory
+    fake_whisper.load_model.return_value.transcribe.return_value = {"text": "x", "segments": []}
+
+    rc = main(
+        [
+            "run",
+            "--url",
+            f"{base_url}/show.mp3",
+            "--slug",
+            "show1",
+            "--audio-dir",
+            str(tmp_path),
+            "--output-dir",
+            str(transcripts_dir),
+            "--corrections-pack",
+            "razib_khan",
+        ]
+    )
+    assert rc == 0
+    cleaned = (transcripts_dir / "show1_clean.txt").read_text(encoding="utf-8")
+    assert "Razib here." in cleaned

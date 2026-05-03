@@ -1,10 +1,12 @@
 """Command-line interface for ``podcast-transcript``.
 
-The CLI exposes three subcommands:
+The CLI exposes:
 
 - ``download`` — fetch a podcast MP3 from a direct URL.
 - ``transcribe`` — run Whisper on a local audio file.
 - ``clean`` — apply rule-based cleanup to a Whisper transcript.
+- ``add-correction`` — append/update an entry in the per-user corrections file.
+- ``run`` — end-to-end: download (or pick from RSS) → transcribe → clean.
 
 It is wired up via ``[project.scripts]`` in ``pyproject.toml`` so installing
 the package puts a ``podcast-transcript`` executable on ``$PATH``.
@@ -21,9 +23,18 @@ from typing import TYPE_CHECKING
 from . import __version__
 from .clean import (
     DEFAULT_REFLOW_SENTENCES,
+    CleanStats,
+    CorrectionsFile,
     clean_transcript,
-    load_corrections,
-    load_default_corrections,
+    load_corrections_file,
+    load_default_corrections_file,
+    merge_corrections_files,
+)
+from .corrections_user import (
+    USER_CORRECTIONS_PATH,
+    PackNotFoundError,
+    load_corrections_pack,
+    upsert_correction,
 )
 from .download import (
     DEFAULT_TIMEOUT_SECONDS,
@@ -137,21 +148,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite the input file with the cleaned output.",
     )
-    clean_parser.add_argument(
-        "--corrections",
-        type=Path,
-        default=None,
-        help=(
-            "Path to an additional corrections TOML file (overrides/extends "
-            "the bundled defaults). Use --no-default-corrections to skip the "
-            "bundled dictionary entirely."
-        ),
-    )
-    clean_parser.add_argument(
-        "--no-default-corrections",
-        action="store_true",
-        help="Skip the corrections dictionary that ships with the package.",
-    )
+    _add_corrections_args(clean_parser)
     clean_parser.add_argument(
         "--reflow",
         action="store_true",
@@ -169,7 +166,156 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Suppress the cleanup summary line.",
     )
 
+    add_corr_parser = subparsers.add_parser(
+        "add-correction",
+        help="Append or update an entry in the per-user corrections file.",
+    )
+    add_corr_parser.add_argument(
+        "wrong",
+        help="The mistranscribed term (matched word-bounded, case-sensitive).",
+    )
+    add_corr_parser.add_argument(
+        "right",
+        nargs="?",
+        default="",
+        help=(
+            "The correct term. Required for confident corrections. Optional "
+            "with --uncertain (an empty value flags the term without a "
+            "suggestion)."
+        ),
+    )
+    add_corr_parser.add_argument(
+        "--uncertain",
+        action="store_true",
+        help="Write to the [uncertain] table — wraps matches as [?: x → y] in output.",
+    )
+    add_corr_parser.add_argument(
+        "--dict",
+        dest="dict_path",
+        type=Path,
+        default=None,
+        help=(
+            f"Destination TOML file (default: {USER_CORRECTIONS_PATH}). "
+            "The chosen file is created if it does not exist."
+        ),
+    )
+
+    run_parser = subparsers.add_parser(
+        "run",
+        help="End-to-end: download (or pick from RSS) → transcribe → clean.",
+    )
+    source_group = run_parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--url", help="Direct http(s) URL to a podcast MP3.")
+    source_group.add_argument("--rss", help="RSS feed URL.")
+    run_parser.add_argument(
+        "--episode-regex",
+        help="With --rss, regex matched against episode <title> (first match wins).",
+    )
+    run_parser.add_argument(
+        "--episode-index",
+        type=int,
+        help="With --rss, 0-based index into the feed (newest=0).",
+    )
+    run_parser.add_argument(
+        "--slug",
+        required=True,
+        help="Output filename stem (.mp3 / .txt / _clean.txt suffixes are appended).",
+    )
+    run_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("transcripts"),
+        help="Directory to write transcript outputs (default: ./transcripts).",
+    )
+    run_parser.add_argument(
+        "--audio-dir",
+        type=Path,
+        default=Path(),
+        help="Directory to write the downloaded MP3 (default: current directory).",
+    )
+    run_parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Whisper model name (default: {DEFAULT_MODEL}).",
+    )
+    run_parser.add_argument(
+        "--language",
+        default=DEFAULT_LANGUAGE,
+        help=f"Language code (default: {DEFAULT_LANGUAGE}). Empty string = autodetect.",
+    )
+    run_parser.add_argument(
+        "--strip-before",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help="Drop everything up to and including the first matching line. Repeatable.",
+    )
+    run_parser.add_argument(
+        "--strip-after",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help=(
+            "Drop everything from the last matching line onward (matched only in the "
+            "tail half of the transcript to avoid mid-conversation false positives). "
+            "Repeatable."
+        ),
+    )
+    run_parser.add_argument(
+        "--reflow",
+        action="store_true",
+        help="Reflow per-segment lines into prose paragraphs.",
+    )
+    run_parser.add_argument(
+        "--sentences-per-paragraph",
+        type=int,
+        default=DEFAULT_REFLOW_SENTENCES,
+        help=f"With --reflow, sentences per paragraph (default: {DEFAULT_REFLOW_SENTENCES}).",
+    )
+    _add_corrections_args(run_parser)
+    run_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=f"HTTP timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS}).",
+    )
+
     return parser
+
+
+def _add_corrections_args(parser: argparse.ArgumentParser) -> None:
+    """Shared corrections-layering flags for ``clean`` and ``run``."""
+    parser.add_argument(
+        "--corrections",
+        action="append",
+        type=Path,
+        default=[],
+        metavar="PATH",
+        help=(
+            "Additional corrections TOML file. Repeatable; later files override "
+            "earlier ones on key conflicts."
+        ),
+    )
+    parser.add_argument(
+        "--corrections-pack",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Bundled corrections pack name (e.g. `razib_khan` → "
+            "data/corrections.razib_khan.toml). Repeatable."
+        ),
+    )
+    parser.add_argument(
+        "--no-default-corrections",
+        action="store_true",
+        help="Skip the bundled `corrections.toml` defaults.",
+    )
+    parser.add_argument(
+        "--no-user-corrections",
+        action="store_true",
+        help=f"Skip the per-user corrections file ({USER_CORRECTIONS_PATH}).",
+    )
 
 
 def _configure_logging(*, verbose: bool) -> None:
@@ -212,13 +358,22 @@ def _run_transcribe(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_corrections(args: argparse.Namespace) -> dict[str, str]:
-    corrections: dict[str, str] = {}
+def _resolve_corrections(args: argparse.Namespace) -> CorrectionsFile:
+    """Build the merged corrections + uncertain dictionaries from CLI flags.
+
+    Layering order (later wins on key conflicts):
+        defaults → bundled packs → user file → explicit --corrections paths.
+    """
+    files: list[CorrectionsFile] = []
     if not args.no_default_corrections:
-        corrections.update(load_default_corrections())
-    if args.corrections is not None:
-        corrections.update(load_corrections(args.corrections))
-    return corrections
+        files.append(load_default_corrections_file())
+    for pack_name in args.corrections_pack:
+        files.append(load_corrections_pack(pack_name))
+    if not args.no_user_corrections and USER_CORRECTIONS_PATH.is_file():
+        files.append(load_corrections_file(USER_CORRECTIONS_PATH))
+    for explicit in args.corrections:
+        files.append(load_corrections_file(explicit))
+    return merge_corrections_files(files)
 
 
 def _resolve_clean_output(args: argparse.Namespace) -> Path:
@@ -231,6 +386,32 @@ def _resolve_clean_output(args: argparse.Namespace) -> Path:
     return input_path.with_suffix(input_path.suffix + ".clean")
 
 
+def _log_clean_summary(
+    *,
+    src: Path,
+    dst: Path,
+    stats: CleanStats,
+) -> None:
+    logger.info(
+        "cleaned %s → %s (lines %d → %d, loops collapsed: %d, outro lines stripped: %d, "
+        "corrections: %d, uncertain: %d%s)",
+        src,
+        dst,
+        stats.lines_in,
+        stats.lines_out,
+        stats.loops_collapsed,
+        stats.outro_lines_stripped,
+        stats.corrections_applied,
+        stats.uncertain_applied,
+        ", reflowed" if stats.reflowed else "",
+    )
+    if stats.preview_cut_reason is not None:
+        logger.warning(
+            "source MP3 may be a preview cut — tail contains %s",
+            stats.preview_cut_reason,
+        )
+
+
 def _run_clean(args: argparse.Namespace) -> int:
     input_path: Path = args.input_file
     if not input_path.is_file():
@@ -238,15 +419,16 @@ def _run_clean(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        corrections = _resolve_corrections(args)
-    except (OSError, ValueError) as exc:
+        corrections_file = _resolve_corrections(args)
+    except (OSError, ValueError, PackNotFoundError) as exc:
         logger.error("could not load corrections: %s", exc)
         return 2
 
     text = input_path.read_text(encoding="utf-8")
     cleaned, stats = clean_transcript(
         text,
-        corrections=corrections,
+        corrections=corrections_file.corrections,
+        uncertain=corrections_file.uncertain,
         reflow=args.reflow,
         sentences_per_paragraph=args.sentences_per_paragraph,
     )
@@ -256,18 +438,64 @@ def _run_clean(args: argparse.Namespace) -> int:
     output_path.write_text(cleaned, encoding="utf-8")
 
     if not args.quiet:
-        logger.info(
-            "cleaned %s → %s (lines %d → %d, loops collapsed: %d, outro lines stripped: %d, "
-            "corrections applied: %d%s)",
-            input_path,
-            output_path,
-            stats.lines_in,
-            stats.lines_out,
-            stats.loops_collapsed,
-            stats.outro_lines_stripped,
-            stats.corrections_applied,
-            ", reflowed" if stats.reflowed else "",
+        _log_clean_summary(src=input_path, dst=output_path, stats=stats)
+    return 0
+
+
+def _run_add_correction(args: argparse.Namespace) -> int:
+    try:
+        target = upsert_correction(
+            args.wrong,
+            args.right,
+            uncertain=args.uncertain,
+            path=args.dict_path,
         )
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 2
+    table = "uncertain" if args.uncertain else "corrections"
+    if args.uncertain and not args.right:
+        logger.info("flagged %r in [%s] of %s", args.wrong, table, target)
+    else:
+        logger.info("set %r → %r in [%s] of %s", args.wrong, args.right, table, target)
+    return 0
+
+
+def _run_run(args: argparse.Namespace) -> int:
+    # Imported here so the heavy pipeline module (which imports feed.py and
+    # transcribe.py's deps lazily) is only paid for when actually invoked.
+    from .pipeline import PipelineError, run_pipeline
+
+    try:
+        corrections_file = _resolve_corrections(args)
+    except (OSError, ValueError, PackNotFoundError) as exc:
+        logger.error("could not load corrections: %s", exc)
+        return 2
+
+    try:
+        run_pipeline(
+            url=args.url,
+            rss_url=args.rss,
+            episode_regex=args.episode_regex,
+            episode_index=args.episode_index,
+            slug=args.slug,
+            audio_dir=args.audio_dir,
+            transcripts_dir=args.output_dir,
+            model=args.model,
+            language=args.language,
+            corrections=corrections_file,
+            strip_before=args.strip_before,
+            strip_after=args.strip_after,
+            reflow=args.reflow,
+            sentences_per_paragraph=args.sentences_per_paragraph,
+            timeout=args.timeout,
+        )
+    except PipelineError as exc:
+        logger.error("%s", exc)
+        return 2
+    except (DownloadError, TranscriptionError, FileNotFoundError, ValueError) as exc:
+        logger.error("%s", exc)
+        return 2
     return 0
 
 
@@ -275,6 +503,8 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "download": _run_download,
     "transcribe": _run_transcribe,
     "clean": _run_clean,
+    "add-correction": _run_add_correction,
+    "run": _run_run,
 }
 
 
