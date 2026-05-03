@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate shell scripts
+        run: |
+          bash -n scripts/setup.sh
+          bash -n scripts/download.sh
+          bash -n scripts/transcribe.sh
+
+      - name: Validate docs present
+        run: |
+          test -f README.md
+          test -f requirements.txt
