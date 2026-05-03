@@ -1,59 +1,83 @@
 # podcast_transcript
 
-Local-only podcast transcription workflow for Apple Silicon Macs using OpenAI Whisper.
+Local-only podcast download and transcription for Apple Silicon Macs, using
+[OpenAI Whisper](https://github.com/openai/whisper).
 
-## Purpose
-
-This repository is designed to:
-- download podcast audio from a direct MP3 URL
-- transcribe it locally on an Apple Silicon Mac
-- keep the code and workflow backed up on GitHub
-
-Audio processing is intended to run locally, not in GitHub Actions.
+Audio processing runs on your Mac. CI is for lint/type-check/tests only — no
+audio touches GitHub Actions.
 
 ## Requirements
 
 - macOS on Apple Silicon
-- Homebrew
-- `ffmpeg`
-- `python@3.11`
+- [Homebrew](https://brew.sh)
+- The setup script installs `ffmpeg` and `python@3.11`.
 
 ## Quick start
 
 ```bash
 ./scripts/setup.sh
-./scripts/download.sh "https://traffic.libsyn.com/secure/unsupervisedlearning/directionalselection_ungated.mp3" razib_directional_selection
-./scripts/transcribe.sh razib_directional_selection.mp3
+
+# Download an episode
+podcast-transcript download \
+  "https://traffic.libsyn.com/secure/unsupervisedlearning/directionalselection_ungated.mp3" \
+  razib_directional_selection
+
+# Transcribe it
+podcast-transcript transcribe razib_directional_selection.mp3
 ```
 
-Outputs are written to `./transcripts/`.
+Outputs are written to `./transcripts/` in five formats: `.txt`, `.srt`,
+`.vtt`, `.tsv`, `.json`.
 
-## Workflow
+## CLI reference
 
-1. Set up a Python virtual environment
-2. Install Whisper
-3. Download a podcast MP3
-4. Transcribe locally with Whisper `large-v3`
-5. Read outputs from `transcripts/`
+```text
+podcast-transcript download URL STEM [--output-dir DIR] [--timeout SECONDS]
+podcast-transcript transcribe AUDIO_FILE [--model MODEL] [--language LANG] [--output-dir DIR]
+```
 
-## Output formats
+Defaults: `--model large-v3`, `--language en`, `--output-dir transcripts`.
 
-The transcription script produces:
-- `.txt`
-- `.srt`
-- `.vtt`
-- `.tsv`
-- `.json`
+For autodetect language, pass `--language ""`. For a faster (less accurate)
+model, pass `--model turbo`.
 
-## Notes
+## How it works
 
-- First run downloads Whisper model weights to `~/.cache/whisper/`
-- `large-v3` is slower but better for technical speech
-- For faster runs, you can switch to `turbo`
-- GitHub Actions in this repo are only for validation and repository hygiene
+- `download_podcast` streams the response to `<file>.part` with `Content-Type`
+  validation and atomic rename, so you never end up with an HTML error page
+  saved as `.mp3`.
+- `transcribe_audio` lazy-imports `whisper`, loads the requested model, and
+  writes all five output formats via `whisper.utils.get_writer`.
 
-## Example
+First run downloads Whisper model weights to `~/.cache/whisper/`.
+
+## Development
 
 ```bash
-open ./transcripts/razib_directional_selection.txt
+source venv/bin/activate
+pip install -e ".[dev]"
+
+ruff check .
+ruff format --check .
+mypy
+pytest
+```
+
+The test suite mocks `whisper`, so it does not require torch and does not
+download model weights.
+
+## Project layout
+
+```
+.
+├── pyproject.toml            # Project metadata, deps, tooling config
+├── src/
+│   └── podcast_transcript/
+│       ├── cli.py            # argparse entry point
+│       ├── download.py       # stdlib-only HTTP download with validation
+│       └── transcribe.py     # Lazy-imported whisper wrapper
+├── tests/                    # pytest unit tests (mock whisper, in-process HTTP server)
+├── scripts/
+│   └── setup.sh              # brew + venv bootstrap
+└── .github/workflows/ci.yml  # lint, type-check, test, shellcheck
 ```

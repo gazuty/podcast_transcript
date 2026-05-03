@@ -1,9 +1,30 @@
+# Virtualenv
 venv/
+.venv/
+.venv-*/
 .env
+
+# macOS
 .DS_Store
+
+# Audio artifacts (run locally, never committed)
 *.mp3
 *.m4a
 *.wav
+*.part
+
+# Whisper outputs and model cache
 transcripts/
-__pycache__/
 .cache/
+
+# Python build/packaging
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
