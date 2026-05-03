@@ -4,12 +4,15 @@ Guidance for Claude (and other AI assistants) working in this repository.
 
 ## What this repo is
 
-A small, local-only podcast download and transcription tool for Apple Silicon
-Macs. It exposes a `podcast-transcript` CLI with two subcommands:
+A small, local-only podcast download, transcription, and transcript-cleanup
+tool for Apple Silicon Macs. It exposes a `podcast-transcript` CLI with three
+subcommands:
 
 - `download` — fetch a podcast MP3 from a direct URL.
 - `transcribe` — run OpenAI Whisper on a local audio file and write outputs
   (`.txt`, `.srt`, `.vtt`, `.tsv`, `.json`) to `./transcripts/`.
+- `clean` — apply rule-based fixes to a Whisper transcript (loop collapse,
+  outro stripping, term corrections, optional paragraph reflow).
 
 Audio processing is intended to run on the user's Mac, **never** in GitHub
 Actions. CI exists only for lint/type-check/tests/shellcheck.
@@ -24,11 +27,15 @@ Actions. CI exists only for lint/type-check/tests/shellcheck.
 │       ├── __init__.py
 │       ├── __main__.py       # `python -m podcast_transcript`
 │       ├── cli.py            # argparse entry point (also wired to console_scripts)
+│       ├── clean.py          # rule-based transcript cleanup
 │       ├── download.py       # stdlib-only HTTP download with validation
 │       ├── transcribe.py     # Lazy-imported whisper wrapper
-│       └── py.typed          # PEP 561 marker
+│       ├── py.typed          # PEP 561 marker
+│       └── data/
+│           └── corrections.toml   # bundled corrections dictionary
 ├── tests/
 │   ├── conftest.py           # fake_whisper fixture, in-process http_server fixture
+│   ├── test_clean.py
 │   ├── test_cli.py
 │   ├── test_download.py
 │   └── test_transcribe.py
@@ -50,6 +57,7 @@ source venv/bin/activate
 # Use the CLI
 podcast-transcript download <url> <stem>
 podcast-transcript transcribe <file.mp3> [--model turbo]
+podcast-transcript clean <transcript.txt> [--reflow]
 
 # Dev loop
 ruff check .                 # lint
@@ -94,6 +102,28 @@ Deliberate: keeps required runtime deps at zero. The function streams to
 `Content-Type` is `audio/*` or `application/octet-stream` to avoid silently
 saving an HTML error page as `.mp3`. Restricts URL schemes to `http`/`https`
 so `urlopen` can't be coerced into reading local files.
+
+### `clean.py` is intentionally rule-based, no LLM.
+
+Four composable passes — each is a pure function, easy to read, easy to
+test, free, and deterministic:
+
+1. **Loop collapser** — `difflib.SequenceMatcher` ratio against a run-leader;
+   collapse runs of `min_run` (default 3) similar adjacent lines.
+2. **Outro stripper** — find the *last* well-formed English line (pure ASCII,
+   sentence-final punctuation OR ≥30 chars) and drop everything after it.
+   Walking from the end gives up too early when a fragment like `"you"` sits
+   between real content and script-mismatch outro junk.
+3. **Corrections** — word-bounded regex substitutions from a TOML file.
+   Defaults ship at `data/corrections.toml`; users extend with
+   `--corrections my.toml`. Bundled via hatchling and loaded via
+   `importlib.resources`.
+4. **Paragraph reflow** (opt-in) — collapse Whisper's per-segment lines into
+   prose paragraphs of N sentences each.
+
+If you reach for an LLM-based polish pass later, add it as an *optional*
+extra (mirror the `whisper` extra pattern) so the rule-based pipeline stays
+zero-dep.
 
 ## Conventions
 

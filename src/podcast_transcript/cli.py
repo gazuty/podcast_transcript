@@ -1,9 +1,10 @@
 """Command-line interface for ``podcast-transcript``.
 
-The CLI exposes two subcommands:
+The CLI exposes three subcommands:
 
 - ``download`` — fetch a podcast MP3 from a direct URL.
 - ``transcribe`` — run Whisper on a local audio file.
+- ``clean`` — apply rule-based cleanup to a Whisper transcript.
 
 It is wired up via ``[project.scripts]`` in ``pyproject.toml`` so installing
 the package puts a ``podcast-transcript`` executable on ``$PATH``.
@@ -18,6 +19,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import __version__
+from .clean import (
+    DEFAULT_REFLOW_SENTENCES,
+    clean_transcript,
+    load_corrections,
+    load_default_corrections,
+)
 from .download import (
     DEFAULT_TIMEOUT_SECONDS,
     DownloadError,
@@ -106,6 +113,62 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory to write transcript outputs (default: ./transcripts).",
     )
 
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Apply rule-based cleanup to a Whisper transcript.",
+    )
+    clean_parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Path to a transcript .txt file produced by `transcribe`.",
+    )
+    output_group = clean_parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Where to write the cleaned transcript. Defaults to "
+            "`<input>.clean.txt` next to the input file."
+        ),
+    )
+    output_group.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Overwrite the input file with the cleaned output.",
+    )
+    clean_parser.add_argument(
+        "--corrections",
+        type=Path,
+        default=None,
+        help=(
+            "Path to an additional corrections TOML file (overrides/extends "
+            "the bundled defaults). Use --no-default-corrections to skip the "
+            "bundled dictionary entirely."
+        ),
+    )
+    clean_parser.add_argument(
+        "--no-default-corrections",
+        action="store_true",
+        help="Skip the corrections dictionary that ships with the package.",
+    )
+    clean_parser.add_argument(
+        "--reflow",
+        action="store_true",
+        help="Reflow per-segment lines into prose paragraphs.",
+    )
+    clean_parser.add_argument(
+        "--sentences-per-paragraph",
+        type=int,
+        default=DEFAULT_REFLOW_SENTENCES,
+        help=(f"With --reflow, sentences per paragraph (default: {DEFAULT_REFLOW_SENTENCES})."),
+    )
+    clean_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress the cleanup summary line.",
+    )
+
     return parser
 
 
@@ -149,9 +212,69 @@ def _run_transcribe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_corrections(args: argparse.Namespace) -> dict[str, str]:
+    corrections: dict[str, str] = {}
+    if not args.no_default_corrections:
+        corrections.update(load_default_corrections())
+    if args.corrections is not None:
+        corrections.update(load_corrections(args.corrections))
+    return corrections
+
+
+def _resolve_clean_output(args: argparse.Namespace) -> Path:
+    input_path: Path = args.input_file
+    if args.in_place:
+        return input_path
+    explicit: Path | None = args.output
+    if explicit is not None:
+        return explicit
+    return input_path.with_suffix(input_path.suffix + ".clean")
+
+
+def _run_clean(args: argparse.Namespace) -> int:
+    input_path: Path = args.input_file
+    if not input_path.is_file():
+        logger.error("input file not found: %s", input_path)
+        return 2
+
+    try:
+        corrections = _resolve_corrections(args)
+    except (OSError, ValueError) as exc:
+        logger.error("could not load corrections: %s", exc)
+        return 2
+
+    text = input_path.read_text(encoding="utf-8")
+    cleaned, stats = clean_transcript(
+        text,
+        corrections=corrections,
+        reflow=args.reflow,
+        sentences_per_paragraph=args.sentences_per_paragraph,
+    )
+
+    output_path = _resolve_clean_output(args)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(cleaned, encoding="utf-8")
+
+    if not args.quiet:
+        logger.info(
+            "cleaned %s → %s (lines %d → %d, loops collapsed: %d, outro lines stripped: %d, "
+            "corrections applied: %d%s)",
+            input_path,
+            output_path,
+            stats.lines_in,
+            stats.lines_out,
+            stats.loops_collapsed,
+            stats.outro_lines_stripped,
+            stats.corrections_applied,
+            ", reflowed" if stats.reflowed else "",
+        )
+    return 0
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "download": _run_download,
     "transcribe": _run_transcribe,
+    "clean": _run_clean,
 }
 
 

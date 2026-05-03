@@ -1,0 +1,16 @@
+# Default corrections applied by `podcast-transcript clean`.
+#
+# Each entry is `wrong = right`. Matching is word-bounded and case-sensitive.
+# Add entries for terms Whisper recurrently mistranscribes in your domain.
+# Keep the bar high — only add corrections you're confident about.
+
+[corrections]
+# Population genetics — standard terms Whisper consistently mishears.
+"Tehima's D" = "Tajima's D"
+"Tehima" = "Tajima"
+"right Fisher controversy" = "Wright-Fisher controversy"
+"right Fisher" = "Wright-Fisher"
+"Sewell Wright" = "Sewall Wright"
+
+# Common phrases.
+"Akbar Yadal" = "Akbari et al."

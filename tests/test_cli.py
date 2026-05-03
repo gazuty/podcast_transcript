@@ -113,3 +113,35 @@ def test_cli_transcribe_missing_audio_returns_2(tmp_path: Path, fake_whisper: Ma
     rc = main(["transcribe", str(tmp_path / "missing.mp3")])
     assert rc == 2
     fake_whisper.load_model.assert_not_called()
+
+
+def test_cli_clean_writes_default_output(tmp_path: Path) -> None:
+    src = tmp_path / "in.txt"
+    src.write_text(
+        "We use Tehima's D.\nbody line.\nbody line.\nbody line.\nbody line.\n",
+        encoding="utf-8",
+    )
+
+    rc = main(["clean", str(src)])
+
+    assert rc == 0
+    out = tmp_path / "in.txt.clean"
+    assert out.is_file()
+    cleaned = out.read_text(encoding="utf-8")
+    assert "Tajima's D" in cleaned
+    assert cleaned.count("body line.") == 1
+
+
+def test_cli_clean_in_place(tmp_path: Path) -> None:
+    src = tmp_path / "in.txt"
+    src.write_text("Tehima's D rules.\n", encoding="utf-8")
+
+    rc = main(["clean", str(src), "--in-place"])
+
+    assert rc == 0
+    assert src.read_text(encoding="utf-8").startswith("Tajima's D")
+
+
+def test_cli_clean_missing_input_returns_2(tmp_path: Path) -> None:
+    rc = main(["clean", str(tmp_path / "nope.txt")])
+    assert rc == 2
