@@ -24,6 +24,14 @@ subcommands:
   falling back to download + Whisper when no usable transcript is
   declared. Always writes `<slug>_clean.txt` after cleanup.
 
+On top of the CLI there is a **podcast library** under
+`podcast-library/`: a structured archive of nominated episodes with
+AI-generated summaries (with a QC pass), a controlled vocabulary for
+speakers/topics, and four grep-friendly markdown indexes, all
+regenerated from a single `episodes.jsonl` source of truth. The
+orchestration lives in `src/podcast_transcript/library/`; see the
+*Podcast library* section below.
+
 Audio processing is intended to run on the user's Mac, **never** in GitHub
 Actions. CI exists only for lint/type-check/tests/shellcheck.
 
@@ -45,16 +53,36 @@ Actions. CI exists only for lint/type-check/tests/shellcheck.
 │       ├── pipeline.py              # end-to-end `run` orchestration
 │       ├── transcribe.py            # lazy-imported whisper wrapper
 │       ├── transcript_fetch.py     # fetch + SRT/VTT → text for publisher transcripts
+│       ├── library/                 # podcast-library orchestration
+│       │   ├── episode.py           # Episode dataclass + validator
+│       │   ├── store.py             # JSONL read/write/upsert
+│       │   ├── vocab.py             # canonical-name + alias resolution
+│       │   ├── indexes.py           # 4 markdown indexes + pending-vocab
+│       │   ├── summarise.py         # anthropic SDK wrapper (lazy import)
+│       │   ├── qc.py                # QC pass + retry orchestration
+│       │   └── ingest.py            # end-to-end orchestration
 │       ├── py.typed                 # PEP 561 marker
 │       └── data/
 │           ├── corrections.toml             # general defaults
 │           └── corrections.razib_khan.toml  # podcast-specific pack
+├── podcast-library/                 # data root (see podcast-library/README.md)
+│   ├── audio/                       # gitignored
+│   ├── transcripts/<slug>/<id>.txt
+│   ├── summaries/<slug>/<id>.md     # plus <id>.qc.md
+│   ├── index/                       # episodes.jsonl + by-*.md + vocab/{topics,speakers}.json
+│   └── scripts/                     # thin argparse shims → library/* code
 ├── tests/
-│   ├── conftest.py                  # fake_whisper, http_server, autouse user-corrections isolation
+│   ├── conftest.py                  # fake_whisper, fake_anthropic, http_server, autouse user-corrections isolation
 │   ├── test_clean.py
 │   ├── test_cli.py
 │   ├── test_download.py
 │   ├── test_feed.py
+│   ├── test_library_episode.py
+│   ├── test_library_indexes.py
+│   ├── test_library_ingest.py
+│   ├── test_library_qc.py
+│   ├── test_library_store.py
+│   ├── test_library_vocab.py
 │   ├── test_page_scrape.py
 │   ├── test_pipeline.py
 │   ├── test_transcribe.py
@@ -83,6 +111,12 @@ podcast-transcript run --url <url> --slug <stem> [--corrections-pack razib_khan]
 podcast-transcript run --rss <feed> --episode-regex <re> --slug <stem>     # uses <podcast:transcript> when present
 podcast-transcript run --page <url> --slug <stem>                          # scrapes SRT/VTT or audio link from page
 podcast-transcript run --rss <feed> ... --no-discover-transcript           # force Whisper even if a transcript is declared
+
+# Podcast library (optional `[summarise]` extra required for ingest)
+python podcast-library/scripts/ingest.py --rss <feed> --episode-index 0 \
+  --podcast "Show Title" --title "Episode One" --pub-date 2026-04-17
+python podcast-library/scripts/rebuild_indexes.py   # regenerate by-*.md from episodes.jsonl
+python podcast-library/scripts/qc_summary.py <transcript.txt> <summary.md> --episode-id <id>
 
 # Dev loop
 ruff check .                 # lint
@@ -205,6 +239,69 @@ Stdlib `xml.etree.ElementTree`, no `feedparser` dep. Only reads `<title>`,
 Items missing an enclosure are skipped silently. Capped at 10 MiB to avoid
 pathological responses chewing memory.
 
+### `library/` builds the podcast archive on top of `pipeline.py`.
+
+Logic in `src/podcast_transcript/library/`; on-disk artifacts under
+`podcast-library/`. The two are connected only via `IngestPaths`, so the
+library root can be relocated per-environment without touching code.
+
+- **`episode.py`** — the schema spine. `Episode` is a `dataclass` with a
+  hand-rolled `validate()` (no pydantic — base package stays zero-dep).
+  Empty optionals are dropped on serialise so JSONL diffs stay tight.
+  `id` follows `<podcast-slug>__<YYYY-MM-DD>__<title-slug>` so ingest is
+  idempotent and by-date sorting is a string sort.
+- **`store.py`** — atomic JSONL read/write/upsert. The whole file is
+  rewritten on every upsert (fine at the scale of a personal library;
+  avoids any concurrency story). Sorted by id for stable diffs.
+- **`vocab.py`** — canonical names + alias resolution from
+  `vocab/{topics,speakers}.json`. Unknown names auto-add via
+  `add_pending()` with `pending: true`; the resolved-but-pending names
+  also land on `Episode.pending_topics` / `pending_speakers` so
+  `pending-vocab.md` can surface them. Aliases are never auto-created.
+- **`indexes.py`** — pure builders for `by-{speaker,topic,date,podcast}.md`
+  plus `pending-vocab.md`. `rebuild_all()` is idempotent (re-running on
+  an unchanged JSONL produces byte-identical output apart from the
+  "Generated at" header line).
+- **`summarise.py`** — lazy `import anthropic` so the base package stays
+  zero-dep. Uses Opus 4.7 with **adaptive thinking** and streams the
+  response. The transcript is sent as a **cached system block**
+  (`cache_control: ephemeral`) so the separate QC call lands as a cache
+  read at ~0.1× input price. Per-episode metadata (title, host, guests)
+  goes in the user turn, not the system block, so the cached prefix
+  stays stable across ingests.
+- **`qc.py`** — fresh `messages.create()` call (no shared context with
+  the summariser) using `output_config.format` with a JSON schema for
+  structured `verdict` / `issues`. Coverage sampling splits the
+  transcript into 10 segments, samples 5 via
+  `random.Random(episode_id)` so the same episode always gets the same
+  chunks. `run_summary_with_qc()` orchestrates one retry on
+  `flagged`/`failed`, attaching QC notes to the regen prompt. On a
+  second failure, the broken summary is **preserved** (never silently
+  overwritten) — if a previous good summary exists at the path, the
+  failed retry is written to `<id>.failed.md` next to it.
+- **`ingest.py`** — single entry point `ingest_episode()` that wires
+  source resolution (reusing `run_pipeline` when not given a transcript
+  path directly) → summarise → QC → vocab → JSONL upsert → rebuild
+  indexes. `IngestPaths` is the only thing that knows where things live.
+
+The `anthropic` SDK is an *optional* dependency under the `summarise`
+extra (`pip install -e '.[summarise]'`). Tests use the `fake_anthropic`
+fixture in `tests/conftest.py`, which mirrors the `fake_whisper`
+pattern — it programs streamed and `create()` responses ahead of time
+and records the call kwargs for assertions, so CI never makes an API
+call.
+
+When extending the library:
+
+- New JSONL fields: extend `Episode.to_dict` / `from_dict` /
+  `validate`, then write a test in `test_library_episode.py` that
+  covers the round-trip *and* a validation failure case.
+- New index file: add a `build_*` function in `indexes.py` and include
+  it in the `rebuild_all` outputs dict; document the file in
+  `podcast-library/README.md`.
+- New QC heuristic: extend the `_QC_SCHEMA` JSON schema and the
+  prompt; the orchestrator handles the rest.
+
 ## Conventions
 
 - **Local-only audio.** Don't add CI steps that download or transcribe audio.
@@ -234,14 +331,20 @@ automatically.
 
 ## When making changes
 
-- README, CLAUDE.md, and `pyproject.toml` should stay in sync on user-visible
-  changes (commands, output paths, supported models, deps).
-- Don't introduce a step that requires network access during transcription —
-  the design assumes audio is already downloaded.
-- New tests go under `tests/`. Use the existing `fake_whisper` and
-  `http_server` fixtures rather than reaching for the real network or torch.
+- README, CLAUDE.md, `podcast-library/README.md`, and `pyproject.toml`
+  should stay in sync on user-visible changes (commands, output paths,
+  supported models, deps).
+- Don't introduce a step that requires network access during transcription
+  or summarisation in CI — the design assumes audio is already on disk and
+  any Anthropic API call only happens locally.
+- New tests go under `tests/`. Use the existing `fake_whisper`,
+  `fake_anthropic`, and `http_server` fixtures rather than reaching for
+  the real network, torch, or the Claude API.
 - New CLI subcommands: add the parser in `cli.py`, a `_run_<name>` handler,
   and a corresponding test in `tests/test_cli.py`.
+- New `podcast-library/scripts/*.py` shims must stay thin — argparse +
+  call into `podcast_transcript.library.*`. Logic and tests live in the
+  Python package, not the script.
 
 ## Known not-done items
 

@@ -66,6 +66,31 @@ write `<slug>_clean.txt`. When a publisher transcript is used, the raw
 caption text is written to `<slug>.txt` (one line per cue) and the audio
 download / other Whisper outputs are skipped.
 
+## Podcast library
+
+There's a separate, structured archive under `podcast-library/` for
+nominated episodes. It builds on top of `run` and adds AI-generated
+summaries (with a QC pass), a controlled vocabulary for speakers and
+topics, and four grep-friendly markdown indexes — all rebuilt from a
+single `episodes.jsonl` source of truth.
+
+```bash
+# Install the optional Claude API dependency
+pip install -e '.[summarise]'
+
+# Ingest one episode end-to-end (RSS, page, direct URL, or pre-made transcript)
+python podcast-library/scripts/ingest.py \
+  --rss "https://feeds.example.com/show.xml" --episode-index 0 \
+  --podcast "Show Title" --title "Episode One" --pub-date 2026-04-17
+
+# Re-regenerate the by-* indexes from episodes.jsonl
+python podcast-library/scripts/rebuild_indexes.py
+```
+
+See `podcast-library/README.md` for the full layout, the episode record
+schema, the summary template, the vocab-promotion workflow, and the QC
+retry rules.
+
 ## CLI reference
 
 ```text
@@ -172,8 +197,17 @@ mypy
 pytest
 ```
 
-The test suite mocks `whisper`, so it does not require torch and does not
-download model weights.
+The test suite mocks `whisper` (via `fake_whisper`) and the `anthropic`
+client (via `fake_anthropic`), so it requires neither torch nor the Claude
+API. CI never makes a real model call.
+
+Optional extras:
+
+| Extra        | Pulls in                | When you need it                          |
+|--------------|-------------------------|-------------------------------------------|
+| `whisper`    | `openai-whisper`, torch | To actually transcribe on your Mac        |
+| `summarise`  | `anthropic`             | To run the podcast-library ingest         |
+| `dev`        | pytest, ruff, mypy      | To work on the codebase                   |
 
 ## Project layout
 
@@ -191,10 +225,24 @@ download model weights.
 │       ├── pipeline.py               # end-to-end `run` orchestration
 │       ├── transcribe.py             # lazy-imported whisper wrapper
 │       ├── transcript_fetch.py      # fetch + SRT/VTT → text for publisher transcripts
+│       ├── library/
+│       │   ├── episode.py            # Episode dataclass + validator
+│       │   ├── store.py              # JSONL read/write/upsert
+│       │   ├── vocab.py              # canonical names + alias resolution
+│       │   ├── indexes.py            # 4 markdown index regenerators + pending-vocab
+│       │   ├── summarise.py          # anthropic SDK wrapper (lazy import)
+│       │   ├── qc.py                 # faithfulness/coverage QC + retry orchestration
+│       │   └── ingest.py             # end-to-end orchestration
 │       └── data/
 │           ├── corrections.toml             # general defaults
 │           └── corrections.razib_khan.toml  # podcast-specific pack
-├── tests/                    # pytest unit tests (mock whisper, in-process HTTP server)
+├── podcast-library/          # structured archive (see its own README)
+│   ├── audio/                # gitignored
+│   ├── transcripts/<slug>/<id>.txt
+│   ├── summaries/<slug>/<id>.md  (+ <id>.qc.md)
+│   ├── index/                # episodes.jsonl + by-*.md + vocab/
+│   └── scripts/              # ingest.py, summarise.py, qc_summary.py, rebuild_indexes.py
+├── tests/                    # pytest unit tests (mock whisper + anthropic, in-process HTTP server)
 ├── scripts/
 │   └── setup.sh              # brew + venv bootstrap
 └── .github/workflows/ci.yml  # lint, type-check, test, shellcheck

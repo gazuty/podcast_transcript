@@ -58,6 +58,99 @@ def fake_whisper(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
+# Anthropic client mocking for library tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeTextBlock:
+    """Minimal stand-in for an anthropic TextBlock — has .type and .text."""
+
+    def __init__(self, text: str) -> None:
+        self.type = "text"
+        self.text = text
+
+
+class _FakeMessage:
+    """Minimal stand-in for an anthropic Message — exposes .content and .stop_reason."""
+
+    def __init__(self, text: str, stop_reason: str = "end_turn") -> None:
+        self.content = [_FakeTextBlock(text)]
+        self.stop_reason = stop_reason
+
+
+class _FakeStreamCtx:
+    """Context manager mimicking ``client.messages.stream(...)``."""
+
+    def __init__(self, message: _FakeMessage) -> None:
+        self._message = message
+
+    def __enter__(self) -> _FakeStreamCtx:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def get_final_message(self) -> _FakeMessage:
+        return self._message
+
+
+class FakeAnthropic:
+    """Programmable Anthropic-client stand-in for library tests.
+
+    Configure responses ahead of time via :meth:`enqueue_stream` (for the
+    summariser path, which uses ``.messages.stream()``) and
+    :meth:`enqueue_create` (for the QC path, which uses ``.messages.create()``).
+    Calls are popped in FIFO order so a single test can drive an
+    end-to-end summary → QC → retry → re-QC sequence.
+
+    Both stream and create record their call kwargs on
+    :attr:`stream_calls` / :attr:`create_calls` for assertions.
+    """
+
+    def __init__(self) -> None:
+        self._stream_queue: list[str] = []
+        self._create_queue: list[str] = []
+        self.stream_calls: list[dict[str, Any]] = []
+        self.create_calls: list[dict[str, Any]] = []
+        self.messages = _FakeMessagesNamespace(self)
+
+    def enqueue_stream(self, response_text: str) -> None:
+        self._stream_queue.append(response_text)
+
+    def enqueue_create(self, response_text: str) -> None:
+        self._create_queue.append(response_text)
+
+
+class _FakeMessagesNamespace:
+    def __init__(self, parent: FakeAnthropic) -> None:
+        self._parent = parent
+
+    def stream(self, **kwargs: Any) -> _FakeStreamCtx:
+        if not self._parent._stream_queue:
+            raise AssertionError(
+                "FakeAnthropic: .messages.stream() called but no response enqueued",
+            )
+        self._parent.stream_calls.append(kwargs)
+        text = self._parent._stream_queue.pop(0)
+        return _FakeStreamCtx(_FakeMessage(text))
+
+    def create(self, **kwargs: Any) -> _FakeMessage:
+        if not self._parent._create_queue:
+            raise AssertionError(
+                "FakeAnthropic: .messages.create() called but no response enqueued",
+            )
+        self._parent.create_calls.append(kwargs)
+        text = self._parent._create_queue.pop(0)
+        return _FakeMessage(text)
+
+
+@pytest.fixture
+def fake_anthropic() -> FakeAnthropic:
+    """Return a fresh :class:`FakeAnthropic` for each test."""
+    return FakeAnthropic()
+
+
+# ---------------------------------------------------------------------------
 # Tiny in-process HTTP server for download tests
 # ---------------------------------------------------------------------------
 
