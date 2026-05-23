@@ -13,16 +13,22 @@ venv/
 *.wav
 *.part
 
-# Whisper outputs and model cache
-transcripts/
+# Top-level Whisper outputs from the base CLI (the library has its own
+# transcripts/ tree under podcast-library/ — see below — which IS tracked).
+/transcripts/
 .cache/
 
-# Podcast library — large/binary artifacts only; everything else (jsonl,
-# md, vocab) is checked in so the library state is reproducible from git.
+# Podcast library — large/binary artifacts and regeneratable Whisper
+# sidecars; the canonical .txt + _clean.txt stay in git so the library
+# state is reproducible from the JSONL + summaries.
 podcast-library/audio/
 podcast-library/transcripts/**/*.mp3
 podcast-library/transcripts/**/*.m4a
 podcast-library/transcripts/**/*.wav
+podcast-library/transcripts/**/*.srt
+podcast-library/transcripts/**/*.vtt
+podcast-library/transcripts/**/*.tsv
+podcast-library/transcripts/**/*.json
 
 # Python build/packaging
 __pycache__/
