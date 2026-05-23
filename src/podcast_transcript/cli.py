@@ -207,6 +207,13 @@ def _build_parser() -> argparse.ArgumentParser:
     source_group = run_parser.add_mutually_exclusive_group(required=True)
     source_group.add_argument("--url", help="Direct http(s) URL to a podcast MP3.")
     source_group.add_argument("--rss", help="RSS feed URL.")
+    source_group.add_argument(
+        "--page",
+        help=(
+            "Episode web page URL. Scraped for an SRT/VTT transcript link first; "
+            "falls back to the audio link on the page if no transcript is found."
+        ),
+    )
     run_parser.add_argument(
         "--episode-regex",
         help="With --rss, regex matched against episode <title> (first match wins).",
@@ -273,6 +280,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"With --reflow, sentences per paragraph (default: {DEFAULT_REFLOW_SENTENCES}).",
     )
     _add_corrections_args(run_parser)
+    run_parser.add_argument(
+        "--no-discover-transcript",
+        dest="discover_transcript",
+        action="store_false",
+        help=(
+            "Skip the publisher-transcript discovery step and always run Whisper. "
+            "Useful when a publisher's transcript is known to be worse than what "
+            "local Whisper produces, or when --url is given (no effect there)."
+        ),
+    )
+    run_parser.set_defaults(discover_transcript=True)
     run_parser.add_argument(
         "--timeout",
         type=float,
@@ -476,6 +494,7 @@ def _run_run(args: argparse.Namespace) -> int:
         run_pipeline(
             url=args.url,
             rss_url=args.rss,
+            page_url=args.page,
             episode_regex=args.episode_regex,
             episode_index=args.episode_index,
             slug=args.slug,
@@ -489,6 +508,7 @@ def _run_run(args: argparse.Namespace) -> int:
             reflow=args.reflow,
             sentences_per_paragraph=args.sentences_per_paragraph,
             timeout=args.timeout,
+            discover_transcript=args.discover_transcript,
         )
     except PipelineError as exc:
         logger.error("%s", exc)

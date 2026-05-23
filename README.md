@@ -39,9 +39,32 @@ podcast-transcript run \
   --corrections-pack razib_khan
 ```
 
+`run` can also nominate an episode by RSS feed or by web-page URL, and will
+prefer a publisher-hosted SRT/VTT transcript when one is declared (skipping
+the Whisper step entirely):
+
+```bash
+# RSS — picks up <podcast:transcript> if the publisher declares one.
+podcast-transcript run \
+  --rss "https://feeds.example.com/show.xml" \
+  --episode-index 0 \
+  --slug latest_episode
+
+# Episode page — scrapes the page for an SRT/VTT link, falls back to the audio.
+podcast-transcript run \
+  --page "https://example.com/episodes/42" \
+  --slug ep42
+```
+
+Pass `--no-discover-transcript` to skip the publisher-transcript step and
+always run Whisper (useful when the publisher's transcript is known to be
+worse than what local Whisper produces).
+
 Outputs are written to `./transcripts/` in five formats: `.txt`, `.srt`,
-`.vtt`, `.tsv`, `.json`. `clean` and `run` additionally write
-`<slug>_clean.txt`.
+`.vtt`, `.tsv`, `.json` when Whisper runs. `clean` and `run` additionally
+write `<slug>_clean.txt`. When a publisher transcript is used, the raw
+caption text is written to `<slug>.txt` (one line per cue) and the audio
+download / other Whisper outputs are skipped.
 
 ## CLI reference
 
@@ -53,13 +76,16 @@ podcast-transcript clean INPUT [--output OUT | --in-place]
                                 [--no-default-corrections] [--no-user-corrections]
                                 [--reflow] [--sentences-per-paragraph N] [--quiet]
 podcast-transcript add-correction WRONG [RIGHT] [--uncertain] [--dict PATH]
-podcast-transcript run (--url URL | --rss FEED [--episode-regex RE | --episode-index N])
+podcast-transcript run (--url URL
+                        | --rss FEED [--episode-regex RE | --episode-index N]
+                        | --page PAGE_URL)
                        --slug SLUG
                        [--audio-dir DIR] [--output-dir DIR]
                        [--model MODEL] [--language LANG]
                        [--strip-before REGEX]... [--strip-after REGEX]...
                        [--corrections FILE]... [--corrections-pack NAME]...
                        [--no-default-corrections] [--no-user-corrections]
+                       [--no-discover-transcript]
                        [--reflow] [--sentences-per-paragraph N] [--timeout SECONDS]
 ```
 
@@ -117,9 +143,20 @@ for hand-edited comments — keep prose docs in the bundled packs.
 - `clean_transcript` runs five composable rule-based passes (loop collapser,
   outro stripper, preview-cut detector, corrections + uncertain annotator,
   optional reflow) — see `clean.py`.
-- `run_pipeline` (in `pipeline.py`) chains download → transcribe →
-  ad-strip → clean. RSS feeds are parsed with stdlib
-  `xml.etree.ElementTree` in `feed.py` (no `feedparser` dep).
+- `run_pipeline` (in `pipeline.py`) chains source-resolution →
+  (publisher-transcript fetch *or* download + transcribe) → ad-strip →
+  clean. RSS feeds are parsed with stdlib `xml.etree.ElementTree` in
+  `feed.py` (no `feedparser` dep) and pick up the Podcasting 2.0
+  `<podcast:transcript>` element when present. Episode web pages are
+  scraped with stdlib `html.parser` (`page_scrape.py`) for SRT/VTT and
+  audio links. SRT/VTT caption text is converted to one prose line per
+  cue in `transcript_fetch.py` so the same `clean.py` passes run
+  unchanged.
+
+Publisher transcripts are accepted only as SRT or VTT (HTML and JSON are
+ignored). When both formats are offered, SRT wins — the cue grammar is
+simpler so text extraction is more robust. `application/x-subrip` and
+`text/srt` are treated as synonyms for `application/srt`.
 
 First run downloads Whisper model weights to `~/.cache/whisper/`.
 
@@ -149,9 +186,11 @@ download model weights.
 │       ├── clean.py                  # rule-based transcript cleanup
 │       ├── corrections_user.py       # per-user corrections file + bundled packs
 │       ├── download.py               # stdlib-only HTTP download with validation
-│       ├── feed.py                   # stdlib-only RSS-2.0 parser
+│       ├── feed.py                   # stdlib-only RSS-2.0 parser (incl. podcast:transcript)
+│       ├── page_scrape.py            # stdlib HTML scraper for `--page` episode URLs
 │       ├── pipeline.py               # end-to-end `run` orchestration
 │       ├── transcribe.py             # lazy-imported whisper wrapper
+│       ├── transcript_fetch.py      # fetch + SRT/VTT → text for publisher transcripts
 │       └── data/
 │           ├── corrections.toml             # general defaults
 │           └── corrections.razib_khan.toml  # podcast-specific pack

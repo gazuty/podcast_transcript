@@ -9,6 +9,7 @@ import pytest
 from podcast_transcript.feed import (
     FeedItem,
     FeedParseError,
+    TranscriptRef,
     fetch_feed,
     load_feed,
     parse_feed,
@@ -120,3 +121,59 @@ def test_load_feed_end_to_end(http_server: Callable[[Responder], str]) -> None:
 def test_fetch_feed_rejects_non_http_scheme() -> None:
     with pytest.raises(ValueError, match="http"):
         fetch_feed("file:///etc/passwd")
+
+
+# ---------------------------------------------------------------------------
+# Podcasting 2.0 <podcast:transcript> parsing
+# ---------------------------------------------------------------------------
+
+
+TRANSCRIPT_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:podcast="https://podcastindex.org/namespace/1.0">
+  <channel>
+    <title>Show</title>
+    <item>
+      <title>With transcript</title>
+      <enclosure url="https://example.com/ep1.mp3" type="audio/mpeg"/>
+      <podcast:transcript url="https://example.com/ep1.srt" type="application/srt" language="en"/>
+      <podcast:transcript url="https://example.com/ep1.vtt" type="text/vtt"/>
+      <podcast:transcript url="https://example.com/ep1.html" type="text/html"/>
+    </item>
+    <item>
+      <title>No transcript declared</title>
+      <enclosure url="https://example.com/ep2.mp3" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Malformed transcript</title>
+      <enclosure url="https://example.com/ep3.mp3" type="audio/mpeg"/>
+      <podcast:transcript url="" type="application/srt"/>
+      <podcast:transcript url="https://example.com/ep3.srt"/>
+    </item>
+  </channel>
+</rss>
+"""
+
+
+def test_parse_feed_extracts_podcast_transcripts() -> None:
+    items = parse_feed(TRANSCRIPT_FEED)
+    with_t, without_t, malformed = items
+
+    assert with_t.transcripts == (
+        TranscriptRef(
+            url="https://example.com/ep1.srt",
+            mime_type="application/srt",
+            language="en",
+        ),
+        TranscriptRef(url="https://example.com/ep1.vtt", mime_type="text/vtt"),
+        TranscriptRef(url="https://example.com/ep1.html", mime_type="text/html"),
+    )
+    assert without_t.transcripts == ()
+    # Both malformed entries (missing url, missing type) are dropped.
+    assert malformed.transcripts == ()
+
+
+def test_parse_feed_default_transcripts_is_empty_tuple() -> None:
+    # Existing minimal feed has no podcast namespace — every item should
+    # still parse cleanly with an empty transcripts tuple.
+    items = parse_feed(SAMPLE_FEED)
+    assert all(item.transcripts == () for item in items)

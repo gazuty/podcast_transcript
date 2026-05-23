@@ -12,6 +12,8 @@ This is a deliberately narrow parser:
   episodes).
 - ``itunes:title`` and similar extensions are ignored; we read plain
   ``<title>`` and ``<pubDate>``.
+- The Podcasting 2.0 ``<podcast:transcript>`` element *is* read, since the
+  whole point of this package's transcript-discovery flow is to honour it.
 """
 
 from __future__ import annotations
@@ -28,8 +30,10 @@ from xml.etree import ElementTree as ET  # community-standard alias
 from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError
 
 __all__ = [
+    "PODCAST_NAMESPACE",
     "FeedItem",
     "FeedParseError",
+    "TranscriptRef",
     "fetch_feed",
     "load_feed",
     "parse_feed",
@@ -37,8 +41,26 @@ __all__ = [
 ]
 
 
+# Podcasting 2.0 namespace, registered at podcastindex.org.
+PODCAST_NAMESPACE = "https://podcastindex.org/namespace/1.0"
+_PODCAST_TRANSCRIPT_TAG = f"{{{PODCAST_NAMESPACE}}}transcript"
+
+
 class FeedParseError(Exception):
     """Raised when the bytes do not look like an RSS-2.0 feed we can read."""
+
+
+@dataclass(frozen=True)
+class TranscriptRef:
+    """A publisher-declared ``<podcast:transcript>`` reference.
+
+    *mime_type* is the raw ``type=`` attribute, lowercased; *language* mirrors
+    the optional ``language=`` attribute (BCP-47, e.g. ``en``).
+    """
+
+    url: str
+    mime_type: str
+    language: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +70,7 @@ class FeedItem:
     title: str
     enclosure_url: str
     pub_date: str | None = None
+    transcripts: tuple[TranscriptRef, ...] = ()
 
 
 def fetch_feed(
@@ -112,9 +135,36 @@ def parse_feed(xml_bytes: bytes) -> list[FeedItem]:
         title = (title_el.text or "").strip() if title_el is not None else ""
         pub_el = item_el.find("pubDate")
         pub_date = (pub_el.text or "").strip() if pub_el is not None and pub_el.text else None
-        items.append(FeedItem(title=title, enclosure_url=url, pub_date=pub_date))
+        transcripts = _parse_transcripts(item_el)
+        items.append(
+            FeedItem(
+                title=title,
+                enclosure_url=url,
+                pub_date=pub_date,
+                transcripts=transcripts,
+            ),
+        )
 
     return items
+
+
+def _parse_transcripts(item_el: ET.Element) -> tuple[TranscriptRef, ...]:
+    """Pull all ``<podcast:transcript>`` children off an ``<item>``.
+
+    Returns them in document order. Entries with no ``url`` or ``type``
+    attribute are skipped silently; callers further downstream filter on
+    mime type to pick formats they can actually consume.
+    """
+    refs: list[TranscriptRef] = []
+    for el in item_el.findall(_PODCAST_TRANSCRIPT_TAG):
+        url = (el.get("url") or "").strip()
+        mime = (el.get("type") or "").strip().lower()
+        if not url or not mime:
+            continue
+        language = el.get("language")
+        language = language.strip() if language else None
+        refs.append(TranscriptRef(url=url, mime_type=mime, language=language or None))
+    return tuple(refs)
 
 
 def load_feed(

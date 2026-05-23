@@ -256,3 +256,94 @@ def test_cli_run_url_mode(
     assert rc == 0
     cleaned = (transcripts_dir / "show1_clean.txt").read_text(encoding="utf-8")
     assert "Razib here." in cleaned
+
+
+_SRT_BODY = b"1\n00:00:01,000 --> 00:00:03,000\nRazeeb on the page.\n"
+
+
+def test_cli_run_page_mode_uses_publisher_transcript(
+    tmp_path: Path,
+    http_server: Callable[[Responder], str],
+    fake_whisper: MagicMock,
+) -> None:
+    """`run --page URL` should fetch the linked SRT and skip Whisper."""
+    transcripts_dir = tmp_path / "transcripts"
+
+    def respond(path: str) -> tuple[int, dict[str, str], bytes]:
+        if path.endswith(".srt"):
+            return (200, {"Content-Type": "application/srt"}, _SRT_BODY)
+        if path.endswith(".mp3"):
+            return (200, {"Content-Type": "audio/mpeg"}, AUDIO_BODY)
+        html = (
+            f'<a href="{base_url}/audio/ep.mp3">listen</a><a href="{base_url}/t/ep.srt">read</a>'
+        ).encode()
+        return (200, {"Content-Type": "text/html"}, html)
+
+    base_url: str = http_server(respond)
+    rc = main(
+        [
+            "run",
+            "--page",
+            f"{base_url}/episode/1",
+            "--slug",
+            "page1",
+            "--audio-dir",
+            str(tmp_path),
+            "--output-dir",
+            str(transcripts_dir),
+            "--corrections-pack",
+            "razib_khan",
+        ],
+    )
+    assert rc == 0
+    fake_whisper.load_model.assert_not_called()
+    cleaned = (transcripts_dir / "page1_clean.txt").read_text(encoding="utf-8")
+    assert "Razib on the page." in cleaned
+
+
+def test_cli_run_no_discover_transcript_forces_whisper(
+    tmp_path: Path,
+    http_server: Callable[[Responder], str],
+    fake_whisper: MagicMock,
+) -> None:
+    """--no-discover-transcript should suppress the publisher-transcript branch."""
+    transcripts_dir = tmp_path / "transcripts"
+
+    def writer_factory(fmt: str, _out_dir: str) -> object:
+        def write(_result: object, audio_path: str) -> None:
+            stem = Path(audio_path).stem
+            (transcripts_dir / f"{stem}.{fmt}").write_text("body.\n", encoding="utf-8")
+
+        return write
+
+    fake_whisper.utils.get_writer.side_effect = writer_factory
+    fake_whisper.load_model.return_value.transcribe.return_value = {"text": "x", "segments": []}
+
+    def respond(path: str) -> tuple[int, dict[str, str], bytes]:
+        if path.endswith(".mp3"):
+            return (200, {"Content-Type": "audio/mpeg"}, AUDIO_BODY)
+        if path.endswith(".srt"):
+            # Returning this would be incorrect — the test should never reach here.
+            return (500, {"Content-Type": "text/plain"}, b"should not be fetched")
+        html = (
+            f'<a href="{base_url}/audio/ep.mp3">listen</a><a href="{base_url}/t/ep.srt">read</a>'
+        ).encode()
+        return (200, {"Content-Type": "text/html"}, html)
+
+    base_url: str = http_server(respond)
+    rc = main(
+        [
+            "run",
+            "--page",
+            f"{base_url}/episode/1",
+            "--slug",
+            "forced",
+            "--audio-dir",
+            str(tmp_path),
+            "--output-dir",
+            str(transcripts_dir),
+            "--no-discover-transcript",
+        ],
+    )
+    assert rc == 0
+    fake_whisper.load_model.assert_called_once()

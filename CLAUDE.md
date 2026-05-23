@@ -16,8 +16,13 @@ subcommands:
   uncertainty annotations, optional paragraph reflow).
 - `add-correction` — append/update an entry in the per-user corrections
   TOML at `~/.config/podcast_transcript/corrections.toml`.
-- `run` — end-to-end pipeline: download (or pick from RSS) → transcribe →
-  ad-strip → clean → write `<slug>_clean.txt`.
+- `run` — end-to-end pipeline. Nominate via `--url`, `--rss` (with
+  `--episode-regex` / `--episode-index`), or `--page` (episode web URL).
+  By default `run` checks for a publisher-hosted SRT/VTT transcript
+  (Podcasting 2.0 `<podcast:transcript>` tag on RSS, or an `.srt`/`.vtt`
+  `<a href>` on a page) and fetches that instead of transcribing — only
+  falling back to download + Whisper when no usable transcript is
+  declared. Always writes `<slug>_clean.txt` after cleanup.
 
 Audio processing is intended to run on the user's Mac, **never** in GitHub
 Actions. CI exists only for lint/type-check/tests/shellcheck.
@@ -35,9 +40,11 @@ Actions. CI exists only for lint/type-check/tests/shellcheck.
 │       ├── clean.py                 # rule-based transcript cleanup
 │       ├── corrections_user.py      # per-user corrections file + bundled packs
 │       ├── download.py              # stdlib-only HTTP download with validation
-│       ├── feed.py                  # stdlib-only RSS-2.0 parser (xml.etree)
+│       ├── feed.py                  # stdlib RSS-2.0 parser + <podcast:transcript> reader
+│       ├── page_scrape.py           # stdlib HTML scrape for `--page` episode URLs
 │       ├── pipeline.py              # end-to-end `run` orchestration
 │       ├── transcribe.py            # lazy-imported whisper wrapper
+│       ├── transcript_fetch.py     # fetch + SRT/VTT → text for publisher transcripts
 │       ├── py.typed                 # PEP 561 marker
 │       └── data/
 │           ├── corrections.toml             # general defaults
@@ -48,8 +55,10 @@ Actions. CI exists only for lint/type-check/tests/shellcheck.
 │   ├── test_cli.py
 │   ├── test_download.py
 │   ├── test_feed.py
+│   ├── test_page_scrape.py
 │   ├── test_pipeline.py
-│   └── test_transcribe.py
+│   ├── test_transcribe.py
+│   └── test_transcript_fetch.py
 ├── scripts/
 │   └── setup.sh              # brew install + venv + `pip install -e .[whisper,dev]`
 └── .github/workflows/
@@ -71,6 +80,9 @@ podcast-transcript transcribe <file.mp3> [--model turbo]
 podcast-transcript clean <transcript.txt> [--corrections-pack razib_khan] [--reflow]
 podcast-transcript add-correction <wrong> <right> [--uncertain]
 podcast-transcript run --url <url> --slug <stem> [--corrections-pack razib_khan]
+podcast-transcript run --rss <feed> --episode-regex <re> --slug <stem>     # uses <podcast:transcript> when present
+podcast-transcript run --page <url> --slug <stem>                          # scrapes SRT/VTT or audio link from page
+podcast-transcript run --rss <feed> ... --no-discover-transcript           # force Whisper even if a transcript is declared
 
 # Dev loop
 ruff check .                 # lint
@@ -145,12 +157,46 @@ zero-dep.
 
 ### `pipeline.py` orchestrates the end-to-end `run` subcommand.
 
-`run_pipeline` chains download → transcribe → ad-strip → clean and writes
-`<transcripts_dir>/<slug>_clean.txt` next to the raw whisper output. The
-ad-strip step uses repeatable `--strip-before` / `--strip-after` regex
-flags; `--strip-after` only fires when the match lands in the tail half of
-the transcript, so an outro phrase that happens to occur naturally
-mid-show doesn't chop the body.
+`run_pipeline` resolves the source (`--url`, `--rss`, or `--page`), then
+either fetches a publisher SRT/VTT transcript or runs download +
+transcribe. Both paths then go through ad-strip → clean and write
+`<transcripts_dir>/<slug>_clean.txt`.
+
+- Publisher transcript discovery is on by default. With `--rss`, we read
+  the Podcasting 2.0 `<podcast:transcript>` element from the selected
+  item. With `--page`, `page_scrape.py` HTML-parses the page for `<a>` /
+  `<link>` / `<audio>` / `<source>` elements pointing at an SRT/VTT (and
+  also the audio fallback). `--no-discover-transcript` disables this
+  step entirely.
+- When a publisher transcript is used, the audio is **not** downloaded
+  and Whisper does **not** run; `PipelineResult.audio_path` is `None`
+  and `transcript_source` is `"rss"` or `"page"` instead of `"whisper"`.
+- The ad-strip step uses repeatable `--strip-before` / `--strip-after`
+  regex flags; `--strip-after` only fires when the match lands in the
+  tail half of the transcript, so an outro phrase that happens to occur
+  naturally mid-show doesn't chop the body. It runs on whichever raw
+  text source produced the transcript (Whisper or fetched).
+
+### `transcript_fetch.py` converts SRT/VTT to one line per cue.
+
+The pipeline accepts publisher transcripts only as SRT (`application/srt`,
+`application/x-subrip`, `text/srt`) or VTT (`text/vtt`, `application/vtt`).
+HTML and JSON are deliberately ignored — HTML stripping is brittle, and
+JSON adoption is too low to be worth a parser. SRT wins ties over VTT
+because the cue grammar is simpler (no `WEBVTT`/`NOTE`/`STYLE`/`REGION`
+blocks, no cue settings) so text extraction is more robust.
+
+Converted output is one line per cue, which matches Whisper's `.txt`
+shape so `clean.py` runs unchanged.
+
+### `page_scrape.py` is the `--page` source.
+
+Uses stdlib `html.parser` (no `beautifulsoup4` dep). Heuristics are
+deliberately conservative — first matching `<a href>` / `<link href>` /
+`<source src>` wins per category. URLs are matched on the path portion
+only so query strings (`?token=…`) don't defeat the extension check.
+Relative hrefs are resolved against the page URL with
+`urllib.parse.urljoin`.
 
 ### `feed.py` is a deliberately narrow RSS-2.0 parser.
 
