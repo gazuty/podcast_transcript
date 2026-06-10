@@ -25,15 +25,13 @@ fallback is "user passes ``--url`` directly" so there's no need to be clever.
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from io import BytesIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
-from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError
+from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError, read_capped
 from .feed import TranscriptRef
 from .transcript_fetch import SRT_MIME_TYPES, VTT_MIME_TYPES
 
@@ -72,10 +70,11 @@ def fetch_page_html(
 ) -> str:
     """Download an HTML page into memory.
 
-    Restricts URL schemes to http/https and rejects responses larger than
-    *max_bytes*. Returns the decoded body (best-effort UTF-8); content-type
-    is *not* enforced because publishers serve podcast pages as a mix of
-    ``text/html``, ``application/xhtml+xml``, and occasionally
+    Restricts URL schemes to http/https. The *max_bytes* cap is enforced
+    while reading, so an oversized response is rejected without being
+    buffered in full. Returns the decoded body (best-effort UTF-8);
+    content-type is *not* enforced because publishers serve podcast pages
+    as a mix of ``text/html``, ``application/xhtml+xml``, and occasionally
     ``application/xml``.
     """
     parsed = urlparse(url)
@@ -84,15 +83,11 @@ def fetch_page_html(
     request = Request(url, headers={"User-Agent": user_agent})
     try:
         with urlopen(request, timeout=timeout) as response:
-            buf = BytesIO()
-            shutil.copyfileobj(response, buf, length=64 * 1024)
-            data = buf.getvalue()
+            data = read_capped(response, max_bytes=max_bytes, url=url, what="page")
     except HTTPError as exc:
         raise DownloadError(f"HTTP {exc.code} fetching {url!r}: {exc.reason}") from exc
     except URLError as exc:
         raise DownloadError(f"Network error fetching {url!r}: {exc.reason}") from exc
-    if len(data) > max_bytes:
-        raise DownloadError(f"page body too large: {len(data)} > {max_bytes}")
     return data.decode("utf-8", errors="replace")
 
 

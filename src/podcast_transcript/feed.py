@@ -19,15 +19,13 @@ This is a deliberately narrow parser:
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass
-from io import BytesIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET  # community-standard alias
 
-from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError
+from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError, read_capped
 
 __all__ = [
     "PODCAST_NAMESPACE",
@@ -82,8 +80,9 @@ def fetch_feed(
 ) -> bytes:
     """Fetch the raw bytes of an RSS feed via ``urllib``.
 
-    Caps the response at *max_bytes* (default 10 MiB) to avoid pathological
-    responses chewing through memory. Restricts URL schemes to http/https.
+    The *max_bytes* cap (default 10 MiB) is enforced while reading, so an
+    oversized or unbounded response is rejected without ever being buffered
+    in full. Restricts URL schemes to http/https.
     """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
@@ -91,24 +90,33 @@ def fetch_feed(
     request = Request(url, headers={"User-Agent": user_agent})
     try:
         with urlopen(request, timeout=timeout) as response:
-            buf = BytesIO()
-            shutil.copyfileobj(response, buf, length=64 * 1024)
-            data = buf.getvalue()
+            return read_capped(response, max_bytes=max_bytes, url=url, what="feed")
     except HTTPError as exc:
         raise DownloadError(f"HTTP {exc.code} fetching {url!r}: {exc.reason}") from exc
     except URLError as exc:
         raise DownloadError(f"Network error fetching {url!r}: {exc.reason}") from exc
-    if len(data) > max_bytes:
-        raise DownloadError(f"feed body too large: {len(data)} > {max_bytes}")
-    return data
+
+
+# DTDs enable entity-expansion attacks (billion laughs) that stdlib
+# ElementTree does not bound, and the byte cap above measures *raw* bytes,
+# not expanded output. No real podcast feed needs a DOCTYPE, so refuse them
+# outright — the same posture defusedxml takes, without the dependency.
+_DTD_MARKER = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 
 
 def parse_feed(xml_bytes: bytes) -> list[FeedItem]:
     """Parse RSS-2.0 bytes into a list of :class:`FeedItem` in feed order.
 
     Items without an ``<enclosure url=…>`` attribute are skipped silently —
-    those are typically blog-only items mixed into a podcast feed.
+    those are typically blog-only items mixed into a podcast feed. Feeds
+    containing a ``<!DOCTYPE``/``<!ENTITY`` declaration are rejected before
+    parsing (entity expansion is unbounded in stdlib ElementTree).
     """
+    if _DTD_MARKER.search(xml_bytes):
+        raise FeedParseError(
+            "feed contains a DOCTYPE/ENTITY declaration; refusing to parse "
+            "(entity expansion is a denial-of-service vector)",
+        )
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError as exc:

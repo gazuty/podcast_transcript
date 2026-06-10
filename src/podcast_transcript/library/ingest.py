@@ -50,7 +50,7 @@ from .episode import (
 )
 from .indexes import rebuild_all
 from .qc import QCResult, format_qc_markdown, run_summary_with_qc
-from .store import upsert
+from .store import load_index, upsert
 from .summarise import AnthropicClientLike, SummariseInput
 from .vocab import Vocab, load_vocab, save_vocab
 
@@ -203,31 +203,44 @@ def ingest_episode(
     # Write summary + QC report
     summary_dest = paths.summaries_dir / podcast_slug / f"{episode_id}.md"
     summary_dest.parent.mkdir(parents=True, exist_ok=True)
+    qc_markdown = format_qc_markdown(qc_result.report, episode_id=episode_id)
+    preserved_summary: SummaryRef | None = None
     if qc_result.report.verdict == "failed":
-        # Spec: don't silently overwrite a failed summary. If a prior good
-        # summary exists at this path, preserve it; write the failed retry
-        # under ``.failed.md`` so the user can compare.
-        if summary_dest.is_file():
-            failed_path = summary_dest.with_suffix(".failed.md")
+        # Spec: don't silently overwrite a *good* summary. The file on disk
+        # alone can't tell good from bad — a prior run that itself failed QC
+        # also wrote to this path — so consult the stored record's qc_status.
+        # On preserve, the prior SummaryRef is carried into the new row so
+        # the record keeps describing what actually sits at the path; the
+        # failed attempt lands in versioned ``.failed[.N].md`` sidecars.
+        preserved_summary = _preservable_prior_summary(paths, episode_id)
+        if summary_dest.is_file() and preserved_summary is not None:
+            failed_path = _next_failed_path(summary_dest)
             failed_path.write_text(qc_result.summary_md, encoding="utf-8")
+            qc_dest = failed_path.with_suffix(".qc.md")
+            qc_dest.write_text(qc_markdown, encoding="utf-8")
             logger.warning(
                 "QC failed; preserved existing summary at %s, wrote retry to %s",
                 summary_dest,
                 failed_path,
             )
         else:
+            preserved_summary = None
             summary_dest.write_text(qc_result.summary_md, encoding="utf-8")
-            logger.warning("QC failed; wrote summary at %s anyway (no prior)", summary_dest)
+            qc_dest = summary_dest.with_suffix(".qc.md")
+            qc_dest.write_text(qc_markdown, encoding="utf-8")
+            logger.warning(
+                "QC failed; wrote summary at %s anyway (no prior good summary)",
+                summary_dest,
+            )
     else:
         summary_dest.write_text(qc_result.summary_md, encoding="utf-8")
+        qc_dest = summary_dest.with_suffix(".qc.md")
+        qc_dest.write_text(qc_markdown, encoding="utf-8")
 
-    qc_dest = summary_dest.with_suffix(".qc.md")
-    qc_dest.write_text(
-        format_qc_markdown(qc_result.report, episode_id=episode_id),
-        encoding="utf-8",
-    )
-
-    # Vocab normalisation
+    # Vocab normalisation. Mutations stay in memory here; the files are
+    # persisted only after the JSONL upsert below succeeds, so a failed
+    # ingest can't leave vocab entries that no episode row references
+    # (which would suppress the pending flags on the eventual re-ingest).
     speakers_vocab = load_vocab(paths.speakers_path)
     topics_vocab = load_vocab(paths.topics_path)
     resolved_speakers, pending_speakers = _normalise_through_vocab(
@@ -238,14 +251,10 @@ def ingest_episode(
         request.proposed_topics,
         topics_vocab,
     )
-    if pending_speakers:
-        for name in pending_speakers:
-            speakers_vocab.add_pending(name)
-        save_vocab(paths.speakers_path, speakers_vocab)
-    if pending_topics:
-        for name in pending_topics:
-            topics_vocab.add_pending(name)
-        save_vocab(paths.topics_path, topics_vocab)
+    for name in pending_speakers:
+        speakers_vocab.add_pending(name)
+    for name in pending_topics:
+        topics_vocab.add_pending(name)
 
     now = datetime.now(UTC).isoformat(timespec="seconds")
     episode = Episode(
@@ -270,7 +279,9 @@ def ingest_episode(
             model=("large-v3" if transcript_source_label == "whisper" else None),
             has_timestamps=False,
         ),
-        summary=SummaryRef(
+        summary=preserved_summary
+        if preserved_summary is not None
+        else SummaryRef(
             path=str(summary_dest.relative_to(paths.library_root)),
             generated_at=now,
             model="claude-opus-4-7",
@@ -283,6 +294,12 @@ def ingest_episode(
         pending_speakers=pending_speakers,
     )
     upsert(paths.jsonl_path, episode)
+
+    # The spine committed — now persist the vocab additions it references.
+    if pending_speakers:
+        save_vocab(paths.speakers_path, speakers_vocab)
+    if pending_topics:
+        save_vocab(paths.topics_path, topics_vocab)
 
     indexes = rebuild_all(index_dir=paths.index_dir, jsonl_path=paths.jsonl_path)
     return IngestResult(
@@ -300,6 +317,36 @@ def ingest_episode(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _preservable_prior_summary(paths: IngestPaths, episode_id: str) -> SummaryRef | None:
+    """The stored summary record for *episode_id*, if it didn't fail QC.
+
+    Only such a summary is worth preserving over a freshly failed one; if
+    there is no prior row (or its qc_status is ``failed``), whatever file
+    sits at the summary path is itself a failed artifact and may be
+    overwritten. Returning the :class:`SummaryRef` (not a bool) lets the
+    caller carry it into the new row, so a preserved summary keeps its
+    original metadata and a *later* failed run still sees it as good.
+    """
+    prior = load_index(paths.jsonl_path).get(episode_id)
+    if prior is not None and prior.summary.qc_status != "failed":
+        return prior.summary
+    return None
+
+
+def _next_failed_path(summary_dest: Path) -> Path:
+    """First free ``<id>.failed.md`` / ``<id>.failed.N.md`` next to *summary_dest*.
+
+    Versioned so a second failed retry doesn't silently overwrite the
+    diagnostics from the first.
+    """
+    candidate = summary_dest.with_suffix(".failed.md")
+    n = 2
+    while candidate.exists():
+        candidate = summary_dest.with_suffix(f".failed.{n}.md")
+        n += 1
+    return candidate
 
 
 def _resolve_transcript(

@@ -125,8 +125,11 @@ def test_cli_clean_writes_default_output(tmp_path: Path) -> None:
     rc = main(["clean", str(src)])
 
     assert rc == 0
-    out = tmp_path / "in.txt.clean"
+    # The documented contract: foo.txt → foo.clean.txt (extension stays
+    # last so *.txt globs still pick the output up).
+    out = tmp_path / "in.clean.txt"
     assert out.is_file()
+    assert not (tmp_path / "in.txt.clean").exists()
     cleaned = out.read_text(encoding="utf-8")
     assert "Tajima's D" in cleaned
     assert cleaned.count("body line.") == 1
@@ -161,7 +164,7 @@ def test_cli_clean_with_corrections_pack(tmp_path: Path) -> None:
         ]
     )
     assert rc == 0
-    cleaned = (tmp_path / "in.txt.clean").read_text(encoding="utf-8")
+    cleaned = (tmp_path / "in.clean.txt").read_text(encoding="utf-8")
     assert "Razib said hello." in cleaned
     assert "[?: Stephen Ghazal → Stephen Gazal]" in cleaned
 
@@ -212,7 +215,7 @@ def test_cli_clean_picks_up_user_file(
     src.write_text("the fnord is everywhere.\n", encoding="utf-8")
     rc = main(["clean", str(src)])
     assert rc == 0
-    cleaned = (tmp_path / "in.txt.clean").read_text(encoding="utf-8")
+    cleaned = (tmp_path / "in.clean.txt").read_text(encoding="utf-8")
     assert "FNORD" in cleaned
 
 

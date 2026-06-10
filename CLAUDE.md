@@ -236,8 +236,12 @@ Relative hrefs are resolved against the page URL with
 
 Stdlib `xml.etree.ElementTree`, no `feedparser` dep. Only reads `<title>`,
 `<enclosure url=…>`, and `<pubDate>`. Atom feeds raise `FeedParseError`.
-Items missing an enclosure are skipped silently. Capped at 10 MiB to avoid
-pathological responses chewing memory.
+Items missing an enclosure are skipped silently. Capped at 10 MiB,
+enforced *during* the read (via `download.read_capped`, shared by all
+three fetchers) so an unbounded response can't OOM the process. Feeds
+containing `<!DOCTYPE`/`<!ENTITY` are rejected before parsing — stdlib
+ElementTree doesn't bound entity expansion, and no real podcast feed
+needs a DTD.
 
 ### `library/` builds the podcast archive on top of `pipeline.py`.
 
@@ -276,13 +280,20 @@ library root can be relocated per-environment without touching code.
   `random.Random(episode_id)` so the same episode always gets the same
   chunks. `run_summary_with_qc()` orchestrates one retry on
   `flagged`/`failed`, attaching QC notes to the regen prompt. On a
-  second failure, the broken summary is **preserved** (never silently
-  overwritten) — if a previous good summary exists at the path, the
-  failed retry is written to `<id>.failed.md` next to it.
+  second failure, a prior **good** summary is never overwritten: the
+  decision keys on the stored row's `qc_status` (not mere file
+  existence), the preserved summary's `SummaryRef` is carried forward
+  into the new row so the record keeps describing what's on disk, and
+  the failed retry lands in a versioned `<id>.failed[.N].md` sidecar
+  (plus matching `.qc.md`) next to it.
 - **`ingest.py`** — single entry point `ingest_episode()` that wires
   source resolution (reusing `run_pipeline` when not given a transcript
-  path directly) → summarise → QC → vocab → JSONL upsert → rebuild
-  indexes. `IngestPaths` is the only thing that knows where things live.
+  path directly) → summarise → QC → vocab (in memory) → JSONL upsert →
+  persist vocab → rebuild indexes. Vocab files are deliberately saved
+  *after* the upsert succeeds, so a failed ingest can't leave pending
+  entries that no episode row references (which would suppress the
+  pending flags on re-ingest). `IngestPaths` is the only thing that
+  knows where things live.
 
 The `anthropic` SDK is an *optional* dependency under the `summarise`
 extra (`pip install -e '.[summarise]'`). Tests use the `fake_anthropic`

@@ -140,7 +140,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Where to write the cleaned transcript. Defaults to "
-            "`<input>.clean.txt` next to the input file."
+            "`<stem>.clean<ext>` next to the input file (foo.txt → foo.clean.txt)."
         ),
     )
     output_group.add_argument(
@@ -401,7 +401,9 @@ def _resolve_clean_output(args: argparse.Namespace) -> Path:
     explicit: Path | None = args.output
     if explicit is not None:
         return explicit
-    return input_path.with_suffix(input_path.suffix + ".clean")
+    # foo.txt → foo.clean.txt — keep the extension last so the output is
+    # still picked up by *.txt globs.
+    return input_path.with_name(f"{input_path.stem}.clean{input_path.suffix}")
 
 
 def _log_clean_summary(

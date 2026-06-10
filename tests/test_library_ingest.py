@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import pytest
+
 from podcast_transcript.library.indexes import rebuild_all
 from podcast_transcript.library.ingest import (
     IngestPaths,
@@ -181,6 +183,131 @@ def test_ingest_episode_failed_qc_preserves_existing_summary(
     failed_path = second.summary_path.with_suffix(".failed.md")
     assert failed_path.is_file()
     assert "Hallucinated nonsense" in failed_path.read_text(encoding="utf-8")
+
+
+def _enqueue_failed_attempt(fake_anthropic: FakeAnthropic, summary_md: str) -> None:
+    """Programme one fully-failed ingest: summarise + QC, then the retry pair."""
+    fail_payload = json.dumps(
+        {
+            "verdict": "failed",
+            "issues": [
+                {
+                    "category": "faithfulness",
+                    "severity": "high",
+                    "description": "Hallucinated a study.",
+                },
+            ],
+        },
+    )
+    fake_anthropic.enqueue_stream(summary_md)
+    fake_anthropic.enqueue_create(fail_payload)
+    fake_anthropic.enqueue_stream(summary_md)
+    fake_anthropic.enqueue_create(fail_payload)
+
+
+def test_ingest_overwrites_prior_failed_summary(
+    tmp_path: Path,
+    fake_anthropic: FakeAnthropic,
+) -> None:
+    """A summary that itself failed QC is replaced, not "preserved" as if good."""
+    paths = _seed_library(tmp_path / "library")
+    transcript_src = tmp_path / "raw.txt"
+    transcript_src.write_text(SAMPLE_TRANSCRIPT, encoding="utf-8")
+    request = IngestRequest(
+        podcast="Show",
+        episode_title="Hello World",
+        pub_date="2026-04-17",
+        transcript_path=transcript_src,
+    )
+
+    _enqueue_failed_attempt(fake_anthropic, "# v1\n\nFirst failed attempt.\n")
+    first = ingest_episode(request, paths=paths, client=fake_anthropic)
+    assert first.qc_result.report.verdict == "failed"
+    assert "First failed" in first.summary_path.read_text(encoding="utf-8")
+
+    _enqueue_failed_attempt(fake_anthropic, "# v2\n\nSecond failed attempt.\n")
+    second = ingest_episode(request, paths=paths, client=fake_anthropic)
+
+    # The file on disk was a failed artifact — the fresh attempt replaces it
+    # and nothing is squirrelled away as a bogus "preserved good summary".
+    assert "Second failed" in second.summary_path.read_text(encoding="utf-8")
+    assert not second.summary_path.with_suffix(".failed.md").exists()
+
+
+def test_ingest_versions_repeated_failed_retries(
+    tmp_path: Path,
+    fake_anthropic: FakeAnthropic,
+) -> None:
+    """Repeated failures never clobber a good summary; sidecars are versioned."""
+    paths = _seed_library(tmp_path / "library")
+    transcript_src = tmp_path / "raw.txt"
+    transcript_src.write_text(SAMPLE_TRANSCRIPT, encoding="utf-8")
+    request = IngestRequest(
+        podcast="Show",
+        episode_title="Hello World",
+        pub_date="2026-04-17",
+        transcript_path=transcript_src,
+    )
+
+    fake_anthropic.enqueue_stream(SAMPLE_SUMMARY_MD)
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "passed", "issues": []}))
+    good = ingest_episode(request, paths=paths, client=fake_anthropic)
+    good_md = good.summary_path.read_text(encoding="utf-8")
+
+    _enqueue_failed_attempt(fake_anthropic, "# bad1\n\nRetry one.\n")
+    ingest_episode(request, paths=paths, client=fake_anthropic)
+    _enqueue_failed_attempt(fake_anthropic, "# bad2\n\nRetry two.\n")
+    second = ingest_episode(request, paths=paths, client=fake_anthropic)
+
+    # The good summary survives both failed re-ingests…
+    assert second.summary_path.read_text(encoding="utf-8") == good_md
+    # …the JSONL row still describes the preserved file, not the failed attempt…
+    index = load_index(paths.jsonl_path)
+    assert index[second.episode.id].summary.qc_status == "passed"
+    # …and each failed attempt got its own versioned sidecar.
+    failed_1 = second.summary_path.with_suffix(".failed.md")
+    failed_2 = second.summary_path.with_suffix(".failed.2.md")
+    assert "bad1" in failed_1.read_text(encoding="utf-8")
+    assert "bad2" in failed_2.read_text(encoding="utf-8")
+
+
+def test_ingest_failure_before_upsert_does_not_persist_vocab(
+    tmp_path: Path,
+    fake_anthropic: FakeAnthropic,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed spine commit must not leave orphaned pending-vocab entries.
+
+    If vocab were saved first, the re-ingest after a transient failure would
+    resolve the names as already-canonical and silently drop their pending
+    flags from the episode row.
+    """
+    paths = _seed_library(tmp_path / "library")
+    fake_anthropic.enqueue_stream(SAMPLE_SUMMARY_MD)
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "passed", "issues": []}))
+    transcript_src = tmp_path / "raw.txt"
+    transcript_src.write_text(SAMPLE_TRANSCRIPT, encoding="utf-8")
+
+    def _boom(path: Path, episode: object) -> bool:
+        raise RuntimeError("simulated spine failure")
+
+    monkeypatch.setattr("podcast_transcript.library.ingest.upsert", _boom)
+
+    request = IngestRequest(
+        podcast="Show",
+        episode_title="Hello",
+        pub_date="2026-04-17",
+        transcript_path=transcript_src,
+        host="Hillary Lin",
+        proposed_topics=["ApoB"],
+    )
+    with pytest.raises(RuntimeError, match="simulated spine failure"):
+        ingest_episode(request, paths=paths, client=fake_anthropic)
+
+    # Vocab files untouched — the eventual successful re-ingest must still
+    # see these names as unknown and flag them pending.
+    assert load_vocab(paths.topics_path).canonical == {}
+    assert load_vocab(paths.speakers_path).canonical == {}
 
 
 def test_rebuild_indexes_script_idempotent_on_seeded_library(

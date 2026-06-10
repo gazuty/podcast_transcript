@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from typing import TYPE_CHECKING
 
 import pytest
@@ -10,6 +11,7 @@ from podcast_transcript.download import (
     DownloadError,
     UnexpectedContentTypeError,
     download_podcast,
+    read_capped,
 )
 
 if TYPE_CHECKING:
@@ -114,3 +116,32 @@ def test_download_rejects_zero_byte_body(
         download_podcast(f"{base_url}/episode.mp3", output)
 
     assert not output.exists()
+
+
+class _UnboundedStream:
+    """A fake response whose body never ends; counts how much was consumed."""
+
+    def __init__(self) -> None:
+        self.bytes_served = 0
+
+    def read(self, amt: int, /) -> bytes:
+        self.bytes_served += amt
+        return b"x" * amt
+
+
+def test_read_capped_rejects_unbounded_stream_during_read() -> None:
+    stream = _UnboundedStream()
+    cap = 256 * 1024
+
+    with pytest.raises(DownloadError, match="too large"):
+        read_capped(stream, max_bytes=cap, url="https://example.com/feed.xml", what="feed")
+
+    # The cap must be enforced *while* reading: at most one 64 KiB chunk past
+    # the cap may be consumed — never the (unbounded) remainder. A
+    # read-then-check implementation would spin here forever.
+    assert stream.bytes_served <= cap + 64 * 1024
+
+
+def test_read_capped_returns_body_under_cap_intact() -> None:
+    body = b"cue line\n" * 1000
+    assert read_capped(BytesIO(body), max_bytes=1 << 20, url="u", what="feed") == body

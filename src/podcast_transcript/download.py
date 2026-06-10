@@ -16,7 +16,9 @@ Implementation notes
 from __future__ import annotations
 
 import shutil
+from io import BytesIO
 from pathlib import Path
+from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -27,6 +29,7 @@ __all__ = [
     "DownloadError",
     "UnexpectedContentTypeError",
     "download_podcast",
+    "read_capped",
 ]
 
 DEFAULT_USER_AGENT = "podcast-transcript/0.1 (+https://github.com/gazuty/podcast_transcript)"
@@ -47,6 +50,39 @@ class DownloadError(Exception):
 
 class UnexpectedContentTypeError(DownloadError):
     """Raised when the server returns a non-audio ``Content-Type``."""
+
+
+class _Readable(Protocol):
+    """The slice of a ``urlopen`` response that :func:`read_capped` needs."""
+
+    def read(self, amt: int, /) -> bytes: ...
+
+
+def read_capped(
+    response: _Readable,
+    *,
+    max_bytes: int,
+    url: str,
+    what: str,
+) -> bytes:
+    """Read *response* into memory, enforcing *max_bytes* **during** the read.
+
+    Reads in 64 KiB chunks and raises as soon as the running total exceeds
+    the cap, so an oversized (or unbounded chunked) response is rejected
+    after buffering at most one chunk past *max_bytes* — never the whole
+    body. This is the in-memory counterpart of the streaming download above;
+    every fetcher that slurps a response should go through it.
+    """
+    buf = BytesIO()
+    while True:
+        chunk = response.read(64 * 1024)
+        if not chunk:
+            return buf.getvalue()
+        buf.write(chunk)
+        if buf.tell() > max_bytes:
+            raise DownloadError(
+                f"{what} body too large fetching {url!r}: exceeds {max_bytes} bytes"
+            )
 
 
 def download_podcast(

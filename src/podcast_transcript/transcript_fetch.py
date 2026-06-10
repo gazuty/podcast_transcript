@@ -20,14 +20,12 @@ branch on transcript shape.
 from __future__ import annotations
 
 import re
-import shutil
-from io import BytesIO
 from typing import TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError
+from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError, read_capped
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -134,7 +132,9 @@ def fetch_transcript_text(
 
     Returns ``(body, content_type)`` where *content_type* is the raw header
     value (lowercased, no parameters), so the caller can route to the
-    right converter even if the feed lied about the format.
+    right converter even if the feed lied about the format. The *max_bytes*
+    cap is enforced while reading, so an oversized response is rejected
+    without being buffered in full.
     """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
@@ -149,15 +149,11 @@ def fetch_transcript_text(
                 raise TranscriptFetchError(
                     f"Refusing to read {url!r} as a transcript: Content-Type {content_type!r}",
                 )
-            buf = BytesIO()
-            shutil.copyfileobj(response, buf, length=64 * 1024)
-            data = buf.getvalue()
+            data = read_capped(response, max_bytes=max_bytes, url=url, what="transcript")
     except HTTPError as exc:
         raise DownloadError(f"HTTP {exc.code} fetching {url!r}: {exc.reason}") from exc
     except URLError as exc:
         raise DownloadError(f"Network error fetching {url!r}: {exc.reason}") from exc
-    if len(data) > max_bytes:
-        raise DownloadError(f"transcript body too large: {len(data)} > {max_bytes}")
     return data.decode("utf-8", errors="replace"), content_type
 
 

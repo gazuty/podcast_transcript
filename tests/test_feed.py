@@ -69,6 +69,26 @@ def test_parse_feed_rejects_garbage() -> None:
         parse_feed(b"not xml at all")
 
 
+def test_parse_feed_rejects_doctype_entity_expansion() -> None:
+    """Billion-laughs-shaped feeds are refused before parsing, not expanded."""
+    evil = (
+        b'<?xml version="1.0"?>\n'
+        b"<!DOCTYPE rss [\n"
+        b'  <!ENTITY a "xxxxxxxxxx">\n'
+        b'  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">\n'
+        b"]>\n"
+        b'<rss version="2.0"><channel><title>&b;</title></channel></rss>'
+    )
+    with pytest.raises(FeedParseError, match="DOCTYPE"):
+        parse_feed(evil)
+
+
+def test_parse_feed_rejects_lone_doctype() -> None:
+    plain = b'<?xml version="1.0"?>\n<!DOCTYPE rss>\n<rss version="2.0"><channel/></rss>'
+    with pytest.raises(FeedParseError, match="DOCTYPE"):
+        parse_feed(plain)
+
+
 def test_select_item_by_regex_first_match() -> None:
     items = parse_feed(SAMPLE_FEED)
     chosen = select_item(items, regex=r"middle")
