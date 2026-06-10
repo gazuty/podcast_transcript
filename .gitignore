@@ -18,17 +18,14 @@ venv/
 /transcripts/
 .cache/
 
-# Podcast library — large/binary artifacts and regeneratable Whisper
-# sidecars; the canonical .txt + _clean.txt stay in git so the library
-# state is reproducible from the JSONL + summaries.
+# Podcast library — personal archive of third-party episode content kept
+# local-only. The transcripts, AI summaries, and JSONL/index are NOT
+# tracked: they reproduce other publishers' material and don't belong in a
+# public repo. The tooling under src/ regenerates this tree from scratch.
 podcast-library/audio/
-podcast-library/transcripts/**/*.mp3
-podcast-library/transcripts/**/*.m4a
-podcast-library/transcripts/**/*.wav
-podcast-library/transcripts/**/*.srt
-podcast-library/transcripts/**/*.vtt
-podcast-library/transcripts/**/*.tsv
-podcast-library/transcripts/**/*.json
+podcast-library/transcripts/
+podcast-library/summaries/
+podcast-library/index/
 
 # Python build/packaging
 __pycache__/
