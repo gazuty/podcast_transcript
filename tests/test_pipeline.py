@@ -317,6 +317,109 @@ def test_run_pipeline_rss_uses_publisher_transcript_when_present(
     assert "Razeeb Khan welcomes you." in raw
 
 
+def test_run_pipeline_falls_back_to_whisper_when_publisher_transcript_unusable(
+    tmp_path: Path,
+    http_server: Callable[[Responder], str],
+    fake_whisper: MagicMock,
+) -> None:
+    """A declared transcript that isn't real captions must not kill the run."""
+    rss_template = (
+        b'<?xml version="1.0"?>\n'
+        b'<rss version="2.0" xmlns:podcast="https://podcastindex.org/namespace/1.0">\n'
+        b"<channel>\n"
+        b"  <item>\n"
+        b"    <title>Episode One</title>\n"
+        b'    <enclosure url="AUDIO_URL" type="audio/mpeg"/>\n'
+        b'    <podcast:transcript url="TRANSCRIPT_URL" type="application/srt"/>\n'
+        b"  </item>\n"
+        b"</channel></rss>\n"
+    )
+    audio_dir = tmp_path / "audio"
+    transcripts_dir = tmp_path / "transcripts"
+    _wire_fake_whisper(fake_whisper, transcripts_dir, "ep1")
+
+    def respond(path: str) -> tuple[int, dict[str, str], bytes]:
+        if path.endswith(".srt"):
+            # Mislabelled: right content type, but the body is an error page
+            # with no cue timestamps in it.
+            return (200, {"Content-Type": "application/srt"}, b"Sorry, that file has moved.")
+        if path.endswith(".mp3"):
+            return (200, {"Content-Type": "audio/mpeg"}, AUDIO_BODY)
+        return (
+            200,
+            {"Content-Type": "application/rss+xml"},
+            rss_template.replace(b"TRANSCRIPT_URL", f"{base_url}/ep.srt".encode()).replace(
+                b"AUDIO_URL", f"{base_url}/ep.mp3".encode()
+            ),
+        )
+
+    base_url: str = http_server(respond)
+    result = run_pipeline(
+        url=None,
+        rss_url=f"{base_url}/feed.xml",
+        episode_regex=r"Episode One",
+        episode_index=None,
+        slug="ep1",
+        audio_dir=audio_dir,
+        transcripts_dir=transcripts_dir,
+        corrections=CorrectionsFile(),
+        strip_before=[],
+        strip_after=[],
+        timeout=5.0,
+    )
+
+    assert result.transcript_source == "whisper"
+    assert result.audio_path is not None
+    fake_whisper.load_model.assert_called_once()
+
+
+def test_run_pipeline_falls_back_when_feed_declares_non_http_transcript(
+    tmp_path: Path,
+    http_server: Callable[[Responder], str],
+    fake_whisper: MagicMock,
+) -> None:
+    """A feed-declared file:// transcript URL is refused but doesn't kill the run."""
+    rss_template = (
+        b'<?xml version="1.0"?>\n'
+        b'<rss version="2.0" xmlns:podcast="https://podcastindex.org/namespace/1.0">\n'
+        b"<channel>\n"
+        b"  <item>\n"
+        b"    <title>Episode One</title>\n"
+        b'    <enclosure url="AUDIO_URL" type="audio/mpeg"/>\n'
+        b'    <podcast:transcript url="file:///etc/captions.srt" type="application/srt"/>\n'
+        b"  </item>\n"
+        b"</channel></rss>\n"
+    )
+    transcripts_dir = tmp_path / "transcripts"
+    _wire_fake_whisper(fake_whisper, transcripts_dir, "ep1")
+
+    def respond(path: str) -> tuple[int, dict[str, str], bytes]:
+        if path.endswith(".mp3"):
+            return (200, {"Content-Type": "audio/mpeg"}, AUDIO_BODY)
+        return (
+            200,
+            {"Content-Type": "application/rss+xml"},
+            rss_template.replace(b"AUDIO_URL", f"{base_url}/ep.mp3".encode()),
+        )
+
+    base_url: str = http_server(respond)
+    result = run_pipeline(
+        url=None,
+        rss_url=f"{base_url}/feed.xml",
+        episode_regex=r"Episode One",
+        episode_index=None,
+        slug="ep1",
+        audio_dir=tmp_path / "audio",
+        transcripts_dir=transcripts_dir,
+        corrections=CorrectionsFile(),
+        strip_before=[],
+        strip_after=[],
+        timeout=5.0,
+    )
+
+    assert result.transcript_source == "whisper"
+
+
 def test_run_pipeline_rss_falls_back_to_whisper_when_no_transcript(
     tmp_path: Path,
     http_server: Callable[[Responder], str],

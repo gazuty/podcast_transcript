@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import random
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 
 from .summarise import (
     DEFAULT_SUMMARISE_MODEL,
@@ -42,6 +42,7 @@ from .summarise import (
     SummariseInput,
     SummariserError,
     summarise_transcript,
+    wrap_api_errors,
 )
 
 if TYPE_CHECKING:
@@ -76,6 +77,11 @@ IssueCategory = Literal[
     "coverage",
     "contamination",
 ]
+Severity = Literal["low", "medium", "high"]
+
+_VALID_VERDICTS: Final[frozenset[str]] = frozenset(get_args(Verdict))
+_VALID_CATEGORIES: Final[frozenset[str]] = frozenset(get_args(IssueCategory))
+_VALID_SEVERITIES: Final[frozenset[str]] = frozenset(get_args(Severity))
 
 
 @dataclass
@@ -83,7 +89,7 @@ class QCIssue:
     """One concrete problem the QC pass found in the summary."""
 
     category: IssueCategory
-    severity: Literal["low", "medium", "high"]
+    severity: Severity
     description: str
     summary_excerpt: str | None = None
     suggested_fix: str | None = None
@@ -140,14 +146,20 @@ def sample_coverage_chunks(
     if not stripped:
         return []
 
+    rng = random.Random(seed)
+
     # Character-based split keeps the implementation deterministic regardless
     # of transcript shape (one line per cue vs paragraphs). Anything below
     # ~50 chars per slice produces meaningless single-character chunks, so
-    # fall back to per-line for short transcripts.
+    # fall back to per-line sampling for short transcripts — still seeded,
+    # so short episodes aren't biased toward their opening lines.
     total_len = len(stripped)
     if total_len < chunk_count * _MIN_COVERAGE_CHUNK_CHARS:
         candidates = [line for line in stripped.splitlines() if line.strip()]
-        return candidates[:sample_size] if candidates else [stripped]
+        if not candidates:
+            return [stripped]
+        picked = sorted(rng.sample(range(len(candidates)), min(sample_size, len(candidates))))
+        return [candidates[i] for i in picked]
 
     chunk_size = total_len // chunk_count
     chunks: list[str] = []
@@ -156,9 +168,7 @@ def sample_coverage_chunks(
         end = total_len if i == chunk_count - 1 else (i + 1) * chunk_size
         chunks.append(stripped[start:end].strip())
 
-    rng = random.Random(seed)
-    picked = rng.sample(range(len(chunks)), min(sample_size, len(chunks)))
-    picked.sort()
+    picked = sorted(rng.sample(range(len(chunks)), min(sample_size, len(chunks))))
     return [chunks[i] for i in picked]
 
 
@@ -269,21 +279,22 @@ def qc_summary(
     coverage_chunks = sample_coverage_chunks(transcript, seed=seed)
     user_text = _render_qc_user_block(summary_md, coverage_chunks)
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=_QC_MAX_TOKENS,
-        thinking={"type": "adaptive"},
-        system=[
-            {"type": "text", "text": _QC_SYSTEM_INSTRUCTIONS},
-            {
-                "type": "text",
-                "text": f"<transcript>\n{transcript}\n</transcript>",
-                "cache_control": {"type": "ephemeral"},
-            },
-        ],
-        messages=[{"role": "user", "content": user_text}],
-        output_config={"format": {"type": "json_schema", "schema": _QC_SCHEMA}},
-    )
+    with wrap_api_errors("QC"):
+        response = client.messages.create(
+            model=model,
+            max_tokens=_QC_MAX_TOKENS,
+            thinking={"type": "adaptive"},
+            system=[
+                {"type": "text", "text": _QC_SYSTEM_INSTRUCTIONS},
+                {
+                    "type": "text",
+                    "text": f"<transcript>\n{transcript}\n</transcript>",
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
+            messages=[{"role": "user", "content": user_text}],
+            output_config={"format": {"type": "json_schema", "schema": _QC_SCHEMA}},
+        )
 
     raw = _extract_first_text(response.content)
     try:
@@ -293,18 +304,34 @@ def qc_summary(
             f"QC pass returned non-JSON content: {raw[:200]!r}",
         ) from exc
 
-    issues = [
-        QCIssue(
-            category=issue["category"],
-            severity=issue["severity"],
-            description=issue["description"],
-            summary_excerpt=issue.get("summary_excerpt"),
-            suggested_fix=issue.get("suggested_fix"),
+    # ``output_config`` declares the schema server-side, but the values
+    # flow into the JSONL record — validate here, before any file is
+    # written, rather than blowing up in Episode.validate() afterwards.
+    verdict = data.get("verdict")
+    if verdict not in _VALID_VERDICTS:
+        raise SummariserError(f"QC pass returned invalid verdict {verdict!r}")
+    issues: list[QCIssue] = []
+    for issue in data.get("issues", []):
+        if not isinstance(issue, dict):
+            raise SummariserError(f"QC issue must be an object, got {type(issue).__name__}")
+        category = issue.get("category")
+        severity = issue.get("severity")
+        description = issue.get("description")
+        if category not in _VALID_CATEGORIES or severity not in _VALID_SEVERITIES:
+            raise SummariserError(f"QC pass returned malformed issue: {issue!r}")
+        if not isinstance(description, str) or not description:
+            raise SummariserError(f"QC issue is missing a description: {issue!r}")
+        issues.append(
+            QCIssue(
+                category=category,
+                severity=severity,
+                description=description,
+                summary_excerpt=issue.get("summary_excerpt"),
+                suggested_fix=issue.get("suggested_fix"),
+            ),
         )
-        for issue in data.get("issues", [])
-    ]
     return QCReport(
-        verdict=data["verdict"],
+        verdict=verdict,
         summary=summary_md,
         issues=issues,
         coverage_chunks=coverage_chunks,

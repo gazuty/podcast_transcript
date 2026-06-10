@@ -165,6 +165,13 @@ def test_validate_rejects_bad_checksum() -> None:
         ep.validate()
 
 
+def test_validate_rejects_naive_timestamp() -> None:
+    """generated_at/ingested_at are documented as UTC — naive stamps lie."""
+    ep = _make_valid_episode(ingested_at="2026-04-18T12:00:00")
+    with pytest.raises(EpisodeValidationError, match="UTC offset"):
+        ep.validate()
+
+
 def test_validate_rejects_unknown_fields_on_load() -> None:
     payload = _make_valid_episode().to_dict()
     payload["unexpected"] = "field"

@@ -23,6 +23,7 @@ from podcast_transcript.library.summarise import (
     SummariseInput,
     SummariserError,
     summarise_transcript,
+    wrap_api_errors,
 )
 
 if TYPE_CHECKING:
@@ -57,6 +58,17 @@ def test_sample_coverage_chunks_empty_returns_empty() -> None:
 def test_sample_coverage_chunks_short_transcript() -> None:
     chunks = sample_coverage_chunks("only one short line", seed="x")
     assert chunks == ["only one short line"]
+
+
+def test_sample_coverage_chunks_short_transcript_is_seeded_not_first_n() -> None:
+    """Short transcripts must sample by seed, not just take the opening lines."""
+    transcript = "\n".join(f"line {i}" for i in range(20))  # short: per-line fallback
+    a = sample_coverage_chunks(transcript, seed="ep1")
+    b = sample_coverage_chunks(transcript, seed="ep1")
+    assert a == b  # deterministic for the same episode
+    assert len(a) == 5
+    # The first five lines exactly would mean the sampler ignored the seed.
+    assert a != [f"line {i}" for i in range(5)]
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +224,43 @@ def test_qc_summary_raises_on_non_json_response(fake_anthropic: FakeAnthropic) -
             summary_md=SAMPLE_SUMMARY,
             seed="ep1",
         )
+
+
+def test_qc_summary_rejects_invalid_verdict(fake_anthropic: FakeAnthropic) -> None:
+    """An out-of-enum verdict must fail HERE, before any file is written."""
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "maybe", "issues": []}))
+    with pytest.raises(SummariserError, match="invalid verdict"):
+        qc_summary(fake_anthropic, transcript="x", summary_md=SAMPLE_SUMMARY, seed="ep1")
+
+
+def test_qc_summary_rejects_malformed_issue(fake_anthropic: FakeAnthropic) -> None:
+    payload = {
+        "verdict": "failed",
+        "issues": [{"category": "vibes", "severity": "high", "description": "nope"}],
+    }
+    fake_anthropic.enqueue_create(json.dumps(payload))
+    with pytest.raises(SummariserError, match="malformed issue"):
+        qc_summary(fake_anthropic, transcript="x", summary_md=SAMPLE_SUMMARY, seed="ep1")
+
+
+# ---------------------------------------------------------------------------
+# wrap_api_errors
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_api_errors_translates_sdk_exceptions() -> None:
+    # Forge an exception that looks like it came from the (optional,
+    # uninstalled) anthropic SDK — matching is by module name.
+    sdk_error = type("RateLimitError", (Exception,), {"__module__": "anthropic"})
+
+    with pytest.raises(SummariserError, match="QC API call failed"), wrap_api_errors("QC"):
+        raise sdk_error("429 too many requests")
+
+
+def test_wrap_api_errors_passes_through_non_sdk_exceptions() -> None:
+    """A bug in our own code must not be dressed up as an API failure."""
+    with pytest.raises(KeyError), wrap_api_errors("summarise"):
+        raise KeyError("verdict")
 
 
 # ---------------------------------------------------------------------------

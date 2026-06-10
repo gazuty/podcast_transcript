@@ -51,7 +51,7 @@ from .episode import (
 from .indexes import rebuild_all
 from .qc import QCResult, format_qc_markdown, run_summary_with_qc
 from .store import load_index, upsert
-from .summarise import AnthropicClientLike, SummariseInput
+from .summarise import DEFAULT_SUMMARISE_MODEL, AnthropicClientLike, SummariseInput
 from .vocab import Vocab, load_vocab, save_vocab
 
 __all__ = [
@@ -243,8 +243,10 @@ def ingest_episode(
     # (which would suppress the pending flags on the eventual re-ingest).
     speakers_vocab = load_vocab(paths.speakers_path)
     topics_vocab = load_vocab(paths.topics_path)
+    # Host first so it leads the speakers list (and survives dedup when a
+    # co-host show also lists them as a guest).
     resolved_speakers, pending_speakers = _normalise_through_vocab(
-        [*(request.guests or []), *([request.host] if request.host else [])],
+        [*([request.host] if request.host else []), *(request.guests or [])],
         speakers_vocab,
     )
     resolved_topics, pending_topics = _normalise_through_vocab(
@@ -284,7 +286,7 @@ def ingest_episode(
         else SummaryRef(
             path=str(summary_dest.relative_to(paths.library_root)),
             generated_at=now,
-            model="claude-opus-4-7",
+            model=DEFAULT_SUMMARISE_MODEL,
             qc_status=qc_result.report.verdict,
             qc_notes_path=str(qc_dest.relative_to(paths.library_root)),
         ),
@@ -293,7 +295,11 @@ def ingest_episode(
         pending_topics=pending_topics,
         pending_speakers=pending_speakers,
     )
-    upsert(paths.jsonl_path, episode)
+    replaced = upsert(paths.jsonl_path, episode)
+    if replaced:
+        # Same id twice is usually a deliberate re-ingest, but two distinct
+        # titles can slugify identically — make the replacement visible.
+        logger.info("replaced existing JSONL row for %s", episode_id)
 
     # The spine committed — now persist the vocab additions it references.
     if pending_speakers:

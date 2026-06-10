@@ -394,8 +394,15 @@ def _parse_iso_timestamp(value: str) -> datetime:
     # normalise just in case some caller passed a Z-suffixed string.
     candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        return datetime.fromisoformat(candidate)
+        parsed = datetime.fromisoformat(candidate)
     except (TypeError, ValueError) as exc:
         raise EpisodeValidationError(
             f"timestamp {value!r} must be ISO 8601 (e.g. 2026-05-23T17:00:00+00:00)",
         ) from exc
+    # The fields these feed (generated_at, ingested_at) are documented as
+    # UTC; a naive timestamp would silently shift meaning across machines.
+    if parsed.tzinfo is None:
+        raise EpisodeValidationError(
+            f"timestamp {value!r} must include a UTC offset (e.g. +00:00)",
+        )
+    return parsed

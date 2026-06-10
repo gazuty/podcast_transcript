@@ -54,6 +54,18 @@ def test_parse_ignores_query_string_on_audio_extension() -> None:
     assert info.audio_url == "https://cdn.example.com/ep42.mp3?token=abc"
 
 
+def test_parse_drops_non_http_schemes() -> None:
+    """file:// and data: candidates must never reach a downstream fetcher."""
+    html = """
+    <a href="file:///etc/secrets.mp3">local</a>
+    <a href="file:///srv/captions.srt">local captions</a>
+    <a href="data:text/vtt,WEBVTT">inline</a>
+    """
+    info = parse_episode_links(html, page_url=PAGE_URL)
+    assert info.audio_url is None
+    assert info.transcripts == ()
+
+
 def test_parse_collects_multiple_transcripts_in_document_order() -> None:
     html = """
     <a href="/t/ep42.srt">SRT</a>

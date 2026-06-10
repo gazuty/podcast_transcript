@@ -22,10 +22,16 @@ import re
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from xml.etree import ElementTree as ET  # community-standard alias
 
-from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError, read_capped
+from .download import (
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_USER_AGENT,
+    DownloadError,
+    open_http,
+    read_capped,
+)
 
 __all__ = [
     "PODCAST_NAMESPACE",
@@ -63,7 +69,12 @@ class TranscriptRef:
 
 @dataclass(frozen=True)
 class FeedItem:
-    """A single ``<item>`` from an RSS feed (only the fields we need)."""
+    """A single ``<item>`` from an RSS feed (only the fields we need).
+
+    *pub_date* is the raw, stripped text of the ``<pubDate>`` element —
+    typically RFC 822 (``Wed, 03 Jan 2026 00:00:00 GMT``) but not parsed
+    or validated here. Callers that need a real date must parse it.
+    """
 
     title: str
     enclosure_url: str
@@ -89,7 +100,7 @@ def fetch_feed(
         raise ValueError(f"Only http(s) URLs are supported, got scheme {parsed.scheme!r}")
     request = Request(url, headers={"User-Agent": user_agent})
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_http(request, timeout=timeout) as response:
             return read_capped(response, max_bytes=max_bytes, url=url, what="feed")
     except HTTPError as exc:
         raise DownloadError(f"HTTP {exc.code} fetching {url!r}: {exc.reason}") from exc
@@ -200,7 +211,13 @@ def select_item(
     if not items:
         raise ValueError("feed has no items with audio enclosures")
     if regex is not None:
-        compiled = re.compile(regex, re.IGNORECASE)
+        try:
+            compiled = re.compile(regex, re.IGNORECASE)
+        except re.error as exc:
+            # ``re.error`` doesn't subclass ValueError, so without this a
+            # bad --episode-regex escapes the CLI's error mapping as a
+            # raw traceback.
+            raise ValueError(f"invalid episode regex {regex!r}: {exc}") from exc
         for item in items:
             if compiled.search(item.title):
                 return item

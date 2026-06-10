@@ -120,6 +120,14 @@ def test_strip_drops_trailing_blank_lines() -> None:
     assert stripped == 3
 
 
+def test_strip_keeps_final_line_with_latin1_accents() -> None:
+    """Accented names English borrows (Latin-1) are not hallucination junk."""
+    lines = ["Great conversation today.", "Thanks for joining us, José."]
+    result, stripped = strip_outro_artifacts(lines)
+    assert result == lines
+    assert stripped == 0
+
+
 # ---------------------------------------------------------------------------
 # apply_corrections
 # ---------------------------------------------------------------------------

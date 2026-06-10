@@ -23,9 +23,15 @@ import re
 from typing import TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
-from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError, read_capped
+from .download import (
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_USER_AGENT,
+    DownloadError,
+    open_http,
+    read_capped,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -66,10 +72,15 @@ VTT_MIME_TYPES: frozenset[str] = frozenset(
 # and protects us from being told to slurp a multi-GB file.
 MAX_TRANSCRIPT_BYTES: int = 5 * 1024 * 1024
 
-# Plain-text content-type prefixes we'll accept on the wire. Servers vary
-# wildly on what they advertise for SRT/VTT — text/* covers most of it.
+# Content-type prefixes we'll accept on the wire. Servers vary on what
+# they advertise for SRT/VTT, so the caption mimes are joined by
+# ``text/plain`` and ``application/octet-stream`` — but NOT a bare
+# ``text/`` prefix, which would wave through ``text/html`` and turn a
+# server error page into a plausible-looking "transcript".
 _ACCEPTED_CONTENT_TYPE_PREFIXES: tuple[str, ...] = (
-    "text/",
+    "text/plain",
+    "text/srt",
+    "text/vtt",
     "application/srt",
     "application/x-subrip",
     "application/vtt",
@@ -80,8 +91,13 @@ _ACCEPTED_CONTENT_TYPE_PREFIXES: tuple[str, ...] = (
 TranscriptKind = str  # "srt" | "vtt"
 
 
-class TranscriptFetchError(Exception):
-    """Raised when a transcript URL can't be fetched or recognised."""
+class TranscriptFetchError(DownloadError):
+    """Raised when a transcript URL can't be fetched or recognised.
+
+    Subclasses :class:`DownloadError` so callers that treat "couldn't get
+    the bytes" uniformly (the pipeline's Whisper fallback, the CLI's error
+    mapping) only need one except clause.
+    """
 
 
 def classify_mime_type(mime_type: str) -> TranscriptKind | None:
@@ -141,7 +157,7 @@ def fetch_transcript_text(
         raise ValueError(f"Only http(s) URLs are supported, got scheme {parsed.scheme!r}")
     request = Request(url, headers={"User-Agent": user_agent})
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_http(request, timeout=timeout) as response:
             content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
             if content_type and not any(
                 content_type.startswith(prefix) for prefix in _ACCEPTED_CONTENT_TYPE_PREFIXES
@@ -164,10 +180,11 @@ def fetch_transcript_text(
 
 # An SRT timestamp line looks like:  "00:01:23,456 --> 00:01:25,789"
 # (some files use a "." instead of "," for the millisecond separator, and
-# VTT uses the same shape but with "."). The arrow may also have optional
-# whitespace.
+# VTT uses the same shape but with "."). VTT additionally allows the hours
+# component to be omitted for cues under an hour ("01:23.456"), so it is
+# optional here. The arrow may have surrounding whitespace.
 _TIMESTAMP_LINE = re.compile(
-    r"^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}.*$",
+    r"^(?:\d{1,2}:)?\d{1,2}:\d{2}[,.]\d{1,3}\s*-->\s*(?:\d{1,2}:)?\d{1,2}:\d{2}[,.]\d{1,3}.*$",
 )
 _INDEX_LINE = re.compile(r"^\d+$")
 

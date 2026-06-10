@@ -32,7 +32,7 @@ from .clean import (
     CorrectionsFile,
     clean_transcript,
 )
-from .download import download_podcast
+from .download import DownloadError, download_podcast
 from .feed import FeedItem, TranscriptRef, load_feed, select_item
 from .page_scrape import PageInfo, discover_episode_links
 from .transcribe import (
@@ -41,6 +41,7 @@ from .transcribe import (
     transcribe_audio,
 )
 from .transcript_fetch import (
+    TranscriptFetchError,
     fetch_transcript_text,
     preferred_transcript,
     subrip_to_text,
@@ -259,9 +260,17 @@ def run_pipeline(
                 kind.upper(),
                 transcript_ref.url,
             )
-            raw_text = _fetch_publisher_transcript(transcript_ref.url, kind, timeout=timeout)
-            raw_path.write_text(raw_text, encoding="utf-8")
-            used_transcript = True
+            try:
+                raw_text = _fetch_publisher_transcript(transcript_ref.url, kind, timeout=timeout)
+            except (DownloadError, ValueError) as exc:
+                # A declared transcript that 404s, is oversized, turns out
+                # not to be captions, or carries a non-http URL (ValueError
+                # from the scheme check) shouldn't kill the run when we can
+                # still transcribe the audio ourselves.
+                logger.warning("publisher transcript unusable (%s); falling back to Whisper", exc)
+            else:
+                raw_path.write_text(raw_text, encoding="utf-8")
+                used_transcript = True
 
     if not used_transcript:
         if resolved.audio_url is None:
@@ -340,11 +349,22 @@ def run_pipeline(
 
 
 def _fetch_publisher_transcript(url: str, kind: str, *, timeout: float) -> str:
-    """Download a publisher SRT/VTT URL and convert it to one-line-per-cue text."""
+    """Download a publisher SRT/VTT URL and convert it to one-line-per-cue text.
+
+    The body must contain at least one ``-->`` cue arrow before conversion —
+    the content-type gate in :func:`fetch_transcript_text` can't catch a
+    server that mislabels an HTML or plain-text page, but no real SRT/VTT
+    file lacks timestamps.
+    """
     body, _content_type = fetch_transcript_text(url, timeout=timeout)
-    if kind == "srt":
-        return subrip_to_text(body)
-    return vtt_to_text(body)
+    if "-->" not in body:
+        raise TranscriptFetchError(
+            f"no cue timestamps in {url!r}; body does not look like SRT/VTT",
+        )
+    text = subrip_to_text(body) if kind == "srt" else vtt_to_text(body)
+    if not text.strip():
+        raise TranscriptFetchError(f"transcript at {url!r} converted to empty text")
+    return text
 
 
 def _download_audio(audio_url: str, *, audio_dir: Path, slug: str, timeout: float) -> Path:

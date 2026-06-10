@@ -14,9 +14,12 @@ Both share the same shape::
 
 Resolution rules (see :func:`Vocab.resolve`):
 
-1. Exact match against ``canonical`` → return as-is, *pending=False*.
+1. Exact match against ``canonical`` → return as-is. *pending* mirrors the
+   entry's stored ``pending`` flag: auto-added names carry ``pending: true``
+   until a human reviews them (remove the flag, or convert the entry to an
+   alias), and they keep surfacing in ``pending-vocab.md`` until then.
 2. Exact match against ``aliases`` → return the canonical it points to,
-   *pending=False*.
+   with that entry's ``pending`` flag.
 3. Otherwise → return the input unchanged with *pending=True*. The caller
    is expected to record the pending entry on the episode (so
    ``pending-vocab.md`` can surface it) and to call :meth:`add_pending`
@@ -67,20 +70,24 @@ class Vocab:
 
         Returns ``(resolved_name, pending)``. *pending* is True when
         *name* matched neither table — the caller still gets a usable
-        name back so ingest doesn't block.
+        name back so ingest doesn't block — or when the canonical entry
+        it matched still carries ``pending: true`` (auto-added by a prior
+        ingest, not yet human-reviewed). Without the latter, a pending
+        term would surface in ``pending-vocab.md`` exactly once and then
+        masquerade as reviewed forever.
         """
         stripped = name.strip()
         if not stripped:
             raise VocabError("cannot resolve empty name")
         if stripped in self.canonical:
-            return stripped, False
+            return stripped, bool(self.canonical[stripped].get("pending", False))
         target = self.aliases.get(stripped)
         if target is not None:
             if target not in self.canonical:
                 raise VocabError(
                     f"alias {stripped!r} points at non-canonical {target!r}",
                 )
-            return target, False
+            return target, bool(self.canonical[target].get("pending", False))
         return stripped, True
 
     def add_pending(self, name: str, *, today: str | None = None) -> bool:
@@ -129,10 +136,16 @@ class Vocab:
             raise VocabError("'canonical' must be an object")
         if not isinstance(aliases_raw, dict):
             raise VocabError("'aliases' must be an object")
-        canonical = {
-            str(k): (v if isinstance(v, dict) else {"added": str(v)})
-            for k, v in canonical_raw.items()
-        }
+        canonical: dict[str, dict[str, Any]] = {}
+        for k, v in canonical_raw.items():
+            if not isinstance(v, dict):
+                # The vocab file is the audit log of every rewrite we
+                # perform; silently coercing a malformed entry would
+                # fabricate history. Make the user fix the file instead.
+                raise VocabError(
+                    f"canonical entry {k!r} must map to an object, got {type(v).__name__}",
+                )
+            canonical[str(k)] = v
         aliases = {str(k): str(v) for k, v in aliases_raw.items()}
         vocab = cls(canonical=canonical, aliases=aliases)
         vocab.validate()

@@ -5,6 +5,11 @@ summaries. The on-disk layout below is the canonical state — every index
 file is regenerated from `index/episodes.jsonl`, which is itself the
 source of truth.
 
+The data tree (`audio/`, `transcripts/`, `summaries/`, `index/`) is
+**local-only and gitignored**: it reproduces third-party podcast content,
+which doesn't belong in a public repository. Only this README and the
+`scripts/` shims are tracked.
+
 ## Layout
 
 ```
@@ -69,9 +74,12 @@ Every ingest:
    transcript and the summary, and produces a verdict (`passed` /
    `flagged` / `failed`) with specific issues.
 4. On `flagged` or `failed`, regenerates the summary once with the QC
-   notes attached. If the retry still fails, the broken summary is
-   **preserved** (not overwritten), `qc_status: failed` is recorded on
-   the JSONL record, and the episode surfaces in `pending-vocab.md`.
+   notes attached. If the retry still fails and the JSONL records a prior
+   summary that *didn't* fail QC, that good summary is preserved — the
+   record keeps describing it, and the failed attempt is written to a
+   versioned `<id>.failed[.N].md` sidecar (with its own `.qc.md`) for
+   comparison. With no good prior, the failed summary is written at the
+   normal path and `qc_status: failed` is recorded.
 5. Normalises every topic and speaker against `vocab/{topics,speakers}.json`.
    Unknown entries are added with `pending: true`; you review them in
    `pending-vocab.md` and promote or alias them by editing the vocab file.
@@ -136,13 +144,14 @@ jq -c 'select(.summary.qc_status == "failed")' \
 ```
 
 When the summariser proposes a name that's neither a canonical entry nor
-an alias, it lands in `pending-vocab.md` with `pending: true` on the JSONL
-record. You either:
+an alias, ingest auto-adds it to `canonical` with `pending: true` and the
+episode lists it in `pending-vocab.md`. The entry keeps resolving as
+pending — and keeps surfacing on every subsequent ingest — until you
+review it:
 
-- promote it: move the entry into `canonical`, drop the `pending` flag
-  next time you ingest, OR
-- alias it: add a row under `aliases` mapping it to an existing canonical
-  name.
+- accept it: remove the `pending` flag from the entry in the vocab JSON, OR
+- alias it: delete the auto-added entry and add a row under `aliases`
+  mapping it to an existing canonical name.
 
 After editing the vocab, re-run `python podcast-library/scripts/rebuild_indexes.py`
 to re-normalise the JSONL records and regenerate the by-* indexes.

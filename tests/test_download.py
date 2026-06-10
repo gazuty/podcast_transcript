@@ -118,6 +118,53 @@ def test_download_rejects_zero_byte_body(
     assert not output.exists()
 
 
+def _redirect_responder(location: str) -> Responder:
+    def respond(_path: str) -> tuple[int, dict[str, str], bytes]:
+        return 302, {"Location": location, "Content-Type": "text/plain"}, b""
+
+    return respond
+
+
+def test_download_blocks_redirect_to_link_local_address(
+    tmp_path: Path, http_server: Callable[[Responder], str]
+) -> None:
+    """A 302 to the cloud metadata range must be refused before connecting."""
+    base_url = http_server(_redirect_responder("http://169.254.169.254/latest/meta-data/"))
+
+    with pytest.raises(DownloadError, match="non-public address"):
+        download_podcast(f"{base_url}/episode.mp3", tmp_path / "episode.mp3")
+
+
+def test_download_blocks_redirect_to_private_address(
+    tmp_path: Path, http_server: Callable[[Responder], str]
+) -> None:
+    base_url = http_server(_redirect_responder("http://10.0.0.1/internal.mp3"))
+
+    with pytest.raises(DownloadError, match="non-public address"):
+        download_podcast(f"{base_url}/episode.mp3", tmp_path / "episode.mp3")
+
+
+def test_download_blocks_redirect_to_file_scheme(
+    tmp_path: Path, http_server: Callable[[Responder], str]
+) -> None:
+    # stdlib itself refuses file:// redirect targets (HTTPError → DownloadError);
+    # this pins that the protection holds whichever layer provides it.
+    base_url = http_server(_redirect_responder("file:///etc/passwd"))
+
+    with pytest.raises(DownloadError):
+        download_podcast(f"{base_url}/episode.mp3", tmp_path / "episode.mp3")
+
+
+def test_download_blocks_redirect_to_ftp_scheme(
+    tmp_path: Path, http_server: Callable[[Responder], str]
+) -> None:
+    # stdlib *allows* ftp redirect targets — our handler must not.
+    base_url = http_server(_redirect_responder("ftp://203.0.113.7/episode.mp3"))
+
+    with pytest.raises(DownloadError, match="non-http"):
+        download_podcast(f"{base_url}/episode.mp3", tmp_path / "episode.mp3")
+
+
 class _UnboundedStream:
     """A fake response whose body never ends; counts how much was consumed."""
 

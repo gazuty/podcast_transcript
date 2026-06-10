@@ -103,7 +103,11 @@ def build_by_podcast(episodes: Iterable[Episode]) -> str:
         for series_name in sorted(with_series):
             series_eps = sorted(
                 with_series[series_name],
-                key=lambda e: (e.series_part if e.series_part is not None else 0, e.pub_date),
+                key=lambda e: (
+                    e.series_part if e.series_part is not None else 0,
+                    e.pub_date,
+                    e.id,
+                ),
             )
             lines.append(f"### {series_name}\n\n")
             for ep in series_eps:
@@ -115,7 +119,7 @@ def build_by_podcast(episodes: Iterable[Episode]) -> str:
         if standalone:
             if with_series:
                 lines.append("### (standalone episodes)\n\n")
-            for ep in sorted(standalone, key=lambda e: e.pub_date):
+            for ep in sorted(standalone, key=lambda e: (e.pub_date, e.id)):
                 lines.append(
                     f"- **{ep.pub_date}** — {_summary_link(ep)}{_qc_badge(ep)}\n",
                 )
@@ -149,7 +153,7 @@ def build_by_speaker(episodes: Iterable[Episode]) -> str:
 
     for speaker in sorted(by_speaker):
         lines.append(f"\n## {speaker}\n\n")
-        ordered = sorted(by_speaker[speaker], key=lambda e: e.pub_date)
+        ordered = sorted(by_speaker[speaker], key=lambda e: (e.pub_date, e.id))
         for ep in ordered:
             lines.append(
                 f"- **{ep.pub_date}** — {_summary_link(ep)} _({ep.podcast})_{_qc_badge(ep)}\n",
@@ -171,7 +175,7 @@ def build_by_topic(episodes: Iterable[Episode]) -> str:
 
     for topic in sorted(by_topic):
         lines.append(f"\n## {topic}\n\n")
-        ordered = sorted(by_topic[topic], key=lambda e: e.pub_date, reverse=True)
+        ordered = sorted(by_topic[topic], key=lambda e: (e.pub_date, e.id), reverse=True)
         for ep in ordered:
             lines.append(
                 f"- **{ep.pub_date}** — {_summary_link(ep)} _({ep.podcast})_{_qc_badge(ep)}\n",
@@ -211,7 +215,7 @@ def build_pending_vocab(episodes: Iterable[Episode]) -> str:
         for topic in sorted(pending_topics):
             ep_list = ", ".join(
                 f"{_summary_link(ep)} ({ep.pub_date})"
-                for ep in sorted(pending_topics[topic], key=lambda e: e.pub_date)
+                for ep in sorted(pending_topics[topic], key=lambda e: (e.pub_date, e.id))
             )
             lines.append(f"- **{topic}** — {ep_list}\n")
         lines.append("\n")
@@ -223,7 +227,7 @@ def build_pending_vocab(episodes: Iterable[Episode]) -> str:
         for speaker in sorted(pending_speakers):
             ep_list = ", ".join(
                 f"{_summary_link(ep)} ({ep.pub_date})"
-                for ep in sorted(pending_speakers[speaker], key=lambda e: e.pub_date)
+                for ep in sorted(pending_speakers[speaker], key=lambda e: (e.pub_date, e.id))
             )
             lines.append(f"- **{speaker}** — {ep_list}\n")
 
@@ -252,6 +256,10 @@ def rebuild_all(*, index_dir: Path, jsonl_path: Path | None = None) -> dict[str,
     written: dict[str, Path] = {}
     for name, body in outputs.items():
         path = index_dir / name
-        path.write_text(body, encoding="utf-8")
+        # Temp + rename, matching the store's discipline — a crash
+        # mid-rebuild shouldn't leave a half-written index.
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(path)
         written[name] = path
     return written

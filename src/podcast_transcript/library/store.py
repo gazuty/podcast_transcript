@@ -2,8 +2,11 @@
 
 One JSON object per line, keyed on :attr:`Episode.id`. The store is small
 (thousands of episodes at most) so we keep it as a flat file — no SQLite,
-no locking. Writes are atomic via ``.part`` rename so a crashed ingest can
-never corrupt the spine.
+no locking. Writes go to a ``.part`` file that is fsync'd and renamed
+into place, so a crashed process never leaves a torn spine. (The rename
+itself is atomic at the filesystem level; surviving power loss mid-rename
+would additionally require fsyncing the parent directory, which we skip —
+a regenerable personal library doesn't warrant it.)
 
 All public functions accept a :class:`pathlib.Path` to the JSONL file so
 tests can point at a tmp file.
@@ -12,6 +15,7 @@ tests can point at a tmp file.
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING
 
 from .episode import Episode, EpisodeValidationError
@@ -88,6 +92,8 @@ def save_all(path: Path, episodes: Iterable[Episode]) -> None:
         for episode in rows:
             json.dump(episode.to_dict(), f, ensure_ascii=False, sort_keys=False)
             f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
     part_path.replace(path)
 
 

@@ -298,16 +298,18 @@ _GOOD_LINE_MIN_LEN = 30
 def _is_well_formed_english_line(line: str) -> bool:
     """A line that *looks like* a real English transcript segment.
 
-    A line counts as well-formed iff it is pure-ASCII alphabetic content AND
-    either ends in sentence-final punctuation/quote OR is at least
-    :data:`_GOOD_LINE_MIN_LEN` characters long. Whisper's outro hallucinations
-    are typically short, unpunctuated, or contain non-Latin script, so they
-    fail this check.
+    A line counts as well-formed iff every letter is ASCII or Latin-1
+    Supplement (the accents English prose actually borrows: José, café,
+    naïve) AND it either ends in sentence-final punctuation/quote OR is at
+    least :data:`_GOOD_LINE_MIN_LEN` characters long. Whisper's outro
+    hallucinations are typically short, unpunctuated, or carry non-Latin
+    or Latin-Extended letters (Cyrillic, CJK, the ě/ł/ř of Polish and
+    Czech junk), so they fail this check.
     """
     stripped = line.strip()
     if not stripped:
         return False
-    if any(c.isalpha() and ord(c) > 127 for c in stripped):
+    if any(c.isalpha() and ord(c) > 0xFF for c in stripped):
         return False
     if stripped.endswith(_SENTENCE_TERMINATORS):
         return True

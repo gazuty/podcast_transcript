@@ -27,11 +27,12 @@ Design notes:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 __all__ = [
     "DEFAULT_MAX_TOKENS",
@@ -40,6 +41,7 @@ __all__ = [
     "SummariseInput",
     "SummariserError",
     "summarise_transcript",
+    "wrap_api_errors",
 ]
 
 
@@ -52,6 +54,25 @@ DEFAULT_MAX_TOKENS: Final[int] = 8000
 
 class SummariserError(RuntimeError):
     """Raised when the summariser can't produce a usable summary."""
+
+
+@contextmanager
+def wrap_api_errors(what: str) -> Iterator[None]:
+    """Translate Anthropic SDK exceptions into :class:`SummariserError`.
+
+    The SDK is an optional dependency, so its exception types can't be
+    imported here without breaking the zero-dep base package; matching on
+    the exception's module keeps the "library code raises typed errors"
+    convention without the import. Anything not from the SDK re-raises
+    untouched — a bug in our code shouldn't be dressed up as an API failure.
+    """
+    try:
+        yield
+    except Exception as exc:
+        module = type(exc).__module__ or ""
+        if module == "anthropic" or module.startswith("anthropic."):
+            raise SummariserError(f"{what} API call failed: {exc}") from exc
+        raise
 
 
 # A structural Protocol so tests can inject a fake client without
@@ -200,9 +221,9 @@ def summarise_transcript(
     Streams the response so we don't trip the SDK's ~10-minute non-stream
     timeout guard on long outputs. Returns the full text body.
 
-    Raises :class:`SummariserError` if the model returns no text content
-    (extremely unusual; usually means a refusal or quota error wrapped
-    elsewhere).
+    Raises :class:`SummariserError` if the model returns no text content,
+    or — via :func:`wrap_api_errors` — if the Anthropic SDK raises (rate
+    limit, timeout, connection failure).
     """
     if not inp.transcript.strip():
         raise SummariserError("cannot summarise an empty transcript")
@@ -210,13 +231,16 @@ def summarise_transcript(
     system_blocks = _build_system_blocks(inp.transcript)
     user_blocks = _build_user_blocks(inp)
 
-    with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        thinking={"type": "adaptive"},
-        system=system_blocks,
-        messages=[{"role": "user", "content": user_blocks}],
-    ) as stream:
+    with (
+        wrap_api_errors("summarise"),
+        client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            thinking={"type": "adaptive"},
+            system=system_blocks,
+            messages=[{"role": "user", "content": user_blocks}],
+        ) as stream,
+    ):
         final = stream.get_final_message()
 
     text = _concat_text_blocks(final.content)

@@ -29,9 +29,15 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
-from .download import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER_AGENT, DownloadError, read_capped
+from .download import (
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_USER_AGENT,
+    DownloadError,
+    open_http,
+    read_capped,
+)
 from .feed import TranscriptRef
 from .transcript_fetch import SRT_MIME_TYPES, VTT_MIME_TYPES
 
@@ -82,7 +88,7 @@ def fetch_page_html(
         raise ValueError(f"Only http(s) URLs are supported, got scheme {parsed.scheme!r}")
     request = Request(url, headers={"User-Agent": user_agent})
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_http(request, timeout=timeout) as response:
             data = read_capped(response, max_bytes=max_bytes, url=url, what="page")
     except HTTPError as exc:
         raise DownloadError(f"HTTP {exc.code} fetching {url!r}: {exc.reason}") from exc
@@ -149,20 +155,30 @@ def _path_endswith(url_lower: str, ext: str) -> bool:
     return path.endswith(ext)
 
 
+def _is_http_url(url: str) -> bool:
+    return urlparse(url).scheme in {"http", "https"}
+
+
 def parse_episode_links(html: str, *, page_url: str) -> PageInfo:
     """Parse *html* and return absolute URLs for transcript / audio links.
 
-    Relative URLs are resolved against *page_url* via :func:`urllib.parse.urljoin`.
+    Relative URLs are resolved against *page_url* via
+    :func:`urllib.parse.urljoin`. Candidates that resolve to anything other
+    than http(s) — a page can legitimately contain ``file://`` or ``data:``
+    hrefs — are dropped here so no downstream fetcher ever sees them.
     """
     parser = _EpisodePageParser()
     parser.feed(html)
     parser.close()
-    transcripts = tuple(
-        TranscriptRef(url=urljoin(page_url, ref.url), mime_type=ref.mime_type)
-        for ref in parser.transcripts
-    )
+    transcripts: list[TranscriptRef] = []
+    for ref in parser.transcripts:
+        resolved = urljoin(page_url, ref.url)
+        if _is_http_url(resolved):
+            transcripts.append(TranscriptRef(url=resolved, mime_type=ref.mime_type))
     audio_url = urljoin(page_url, parser.audio_url) if parser.audio_url else None
-    return PageInfo(transcripts=transcripts, audio_url=audio_url)
+    if audio_url is not None and not _is_http_url(audio_url):
+        audio_url = None
+    return PageInfo(transcripts=tuple(transcripts), audio_url=audio_url)
 
 
 def discover_episode_links(

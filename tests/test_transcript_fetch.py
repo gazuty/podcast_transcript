@@ -111,15 +111,28 @@ def test_fetch_transcript_text_rejects_non_http() -> None:
 
 
 def test_fetch_transcript_text_rejects_html(http_server: Callable[[Responder], str]) -> None:
+    """text/html must NOT pass the gate — an error page is not a transcript."""
+
     def respond(_path: str) -> tuple[int, dict[str, str], bytes]:
         return (200, {"Content-Type": "text/html"}, b"<html><body>not a transcript</body></html>")
 
     base_url = http_server(respond)
-    # text/* is in the accepted prefix list (publishers serve SRT as text/plain),
-    # so text/html actually passes the prefix gate; the *converter* would fail.
-    # Verify the more important check: octet-stream of a real .srt is accepted.
-    body, _ = fetch_transcript_text(f"{base_url}/ep.html")
-    assert "<html>" in body
+    with pytest.raises(TranscriptFetchError, match="Content-Type"):
+        fetch_transcript_text(f"{base_url}/ep.html")
+
+
+def test_fetch_transcript_text_accepts_text_plain(
+    http_server: Callable[[Responder], str],
+) -> None:
+    """Publishers commonly serve SRT as text/plain; that stays accepted."""
+
+    def respond(_path: str) -> tuple[int, dict[str, str], bytes]:
+        return (200, {"Content-Type": "text/plain; charset=utf-8"}, SRT_BODY)
+
+    base_url = http_server(respond)
+    body, content_type = fetch_transcript_text(f"{base_url}/ep.srt")
+    assert "Hello, world." in body
+    assert content_type == "text/plain"
 
 
 def test_fetch_transcript_text_rejects_unsupported_content_type(
@@ -223,6 +236,12 @@ def test_vtt_to_text_strips_header_notes_and_cue_settings() -> None:
         "Hello from VTT.",
         "Cue with settings spanning two lines.",
     ]
+
+
+def test_vtt_to_text_handles_short_form_timestamps() -> None:
+    """VTT allows MM:SS.mmm (no hours) for cues under an hour."""
+    vtt = "WEBVTT\n\n01:23.456 --> 01:25.789\nShort-form cue text.\n"
+    assert vtt_to_text(vtt) == "Short-form cue text."
 
 
 def test_vtt_to_text_handles_no_blank_between_header_and_cue() -> None:

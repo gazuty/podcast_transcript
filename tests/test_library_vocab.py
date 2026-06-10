@@ -38,6 +38,31 @@ def test_resolve_unknown_returns_pending() -> None:
     assert pending is True
 
 
+def test_resolve_auto_added_entry_stays_pending_until_reviewed() -> None:
+    """An entry that add_pending created keeps surfacing as pending."""
+    vocab = Vocab()
+    vocab.add_pending("ApoB", today="2026-05-23")
+    resolved, pending = vocab.resolve("ApoB")
+    assert resolved == "ApoB"
+    assert pending is True
+    # Human review = removing the flag from the JSON; then it's settled.
+    del vocab.canonical["ApoB"]["pending"]
+    assert vocab.resolve("ApoB") == ("ApoB", False)
+
+
+def test_resolve_alias_to_pending_canonical_propagates_flag() -> None:
+    vocab = Vocab(
+        canonical={"Lp(a)": {"added": "2026-05-23", "pending": True}},
+        aliases={"lipoprotein(a)": "Lp(a)"},
+    )
+    assert vocab.resolve("lipoprotein(a)") == ("Lp(a)", True)
+
+
+def test_from_dict_rejects_non_object_canonical_entry() -> None:
+    with pytest.raises(VocabError, match="must map to an object"):
+        Vocab.from_dict({"canonical": {"ApoB": "2026-05-23"}, "aliases": {}})
+
+
 def test_resolve_rejects_empty() -> None:
     vocab = Vocab()
     with pytest.raises(VocabError):

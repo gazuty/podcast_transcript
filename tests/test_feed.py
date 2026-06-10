@@ -107,6 +107,13 @@ def test_select_item_no_match_raises() -> None:
         select_item(items, regex=r"never going to match")
 
 
+def test_select_item_invalid_regex_raises_value_error() -> None:
+    """re.error doesn't subclass ValueError; the CLI only maps the latter."""
+    items = parse_feed(SAMPLE_FEED)
+    with pytest.raises(ValueError, match="invalid episode regex"):
+        select_item(items, regex=r"[unclosed")
+
+
 def test_select_item_index_out_of_range() -> None:
     items = parse_feed(SAMPLE_FEED)
     with pytest.raises(ValueError, match="out of range"):

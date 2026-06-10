@@ -66,11 +66,11 @@ Actions. CI exists only for lint/type-check/tests/shellcheck.
 │           ├── corrections.toml             # general defaults
 │           └── corrections.razib_khan.toml  # podcast-specific pack
 ├── podcast-library/                 # data root (see podcast-library/README.md)
-│   ├── audio/                       # gitignored
-│   ├── transcripts/<slug>/<id>.txt
-│   ├── summaries/<slug>/<id>.md     # plus <id>.qc.md
-│   ├── index/                       # episodes.jsonl + by-*.md + vocab/{topics,speakers}.json
-│   └── scripts/                     # thin argparse shims → library/* code
+│   ├── audio/                       # local-only, gitignored
+│   ├── transcripts/<slug>/<id>.txt  # local-only, gitignored
+│   ├── summaries/<slug>/<id>.md     # local-only, gitignored (plus <id>.qc.md)
+│   ├── index/                       # local-only, gitignored (episodes.jsonl + by-*.md + vocab/)
+│   └── scripts/                     # thin argparse shims → library/* code (tracked)
 ├── tests/
 │   ├── conftest.py                  # fake_whisper, fake_anthropic, http_server, autouse user-corrections isolation
 │   ├── test_clean.py
@@ -162,6 +162,13 @@ Deliberate: keeps required runtime deps at zero. The function streams to
 saving an HTML error page as `.mp3`. Restricts URL schemes to `http`/`https`
 so `urlopen` can't be coerced into reading local files.
 
+`download.py` is also the home of the shared fetch plumbing the other
+network modules import: `open_http` (redirect-hop validation — every hop
+must stay http(s) and must not resolve to a loopback/private/link-local
+address; the SSRF defence described in SECURITY.md) and `read_capped`
+(in-memory reads with the byte cap enforced during the read). Any new
+fetcher must go through both rather than calling `urlopen` directly.
+
 ### `clean.py` is intentionally rule-based, no LLM.
 
 Five composable passes — each is a pure function, easy to read, easy to
@@ -201,7 +208,9 @@ transcribe. Both paths then go through ad-strip → clean and write
   item. With `--page`, `page_scrape.py` HTML-parses the page for `<a>` /
   `<link>` / `<audio>` / `<source>` elements pointing at an SRT/VTT (and
   also the audio fallback). `--no-discover-transcript` disables this
-  step entirely.
+  step entirely. If the declared transcript can't be fetched or doesn't
+  look like captions, the pipeline logs a warning and falls back to
+  download + Whisper rather than failing the run.
 - When a publisher transcript is used, the audio is **not** downloaded
   and Whisper does **not** run; `PipelineResult.audio_path` is `None`
   and `transcript_source` is `"rss"` or `"page"` instead of `"whisper"`.
@@ -216,7 +225,11 @@ transcribe. Both paths then go through ad-strip → clean and write
 The pipeline accepts publisher transcripts only as SRT (`application/srt`,
 `application/x-subrip`, `text/srt`) or VTT (`text/vtt`, `application/vtt`).
 HTML and JSON are deliberately ignored — HTML stripping is brittle, and
-JSON adoption is too low to be worth a parser. SRT wins ties over VTT
+JSON adoption is too low to be worth a parser. On the wire, `text/plain`
+and `application/octet-stream` are also accepted (publishers mislabel),
+but `text/html` is refused, and the pipeline additionally requires a
+`-->` cue arrow in the body before converting — a mislabelled error page
+must not become a plausible-looking transcript. SRT wins ties over VTT
 because the cue grammar is simpler (no `WEBVTT`/`NOTE`/`STYLE`/`REGION`
 blocks, no cue settings) so text extraction is more robust.
 
@@ -261,7 +274,11 @@ library root can be relocated per-environment without touching code.
   `vocab/{topics,speakers}.json`. Unknown names auto-add via
   `add_pending()` with `pending: true`; the resolved-but-pending names
   also land on `Episode.pending_topics` / `pending_speakers` so
-  `pending-vocab.md` can surface them. Aliases are never auto-created.
+  `pending-vocab.md` can surface them. `resolve()` keeps returning
+  `pending=True` for an entry that still carries the flag, so an
+  unreviewed term resurfaces on every ingest until a human clears it
+  (remove the flag, or replace the entry with an alias). Aliases are
+  never auto-created.
 - **`indexes.py`** — pure builders for `by-{speaker,topic,date,podcast}.md`
   plus `pending-vocab.md`. `rebuild_all()` is idempotent (re-running on
   an unchanged JSONL produces byte-identical output apart from the
@@ -359,6 +376,5 @@ automatically.
 
 ## Known not-done items
 
-- No `LICENSE` file (repo is private).
 - No release/publishing pipeline. The package isn't on PyPI; install is local
   via `pip install -e`.

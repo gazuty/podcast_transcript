@@ -67,9 +67,11 @@ def transcribe_audio(
     Args:
         audio_path: Path to a local audio file (``.mp3``, ``.m4a``, ``.wav``, ...).
         model_name: Whisper model name (e.g. ``large-v3``, ``turbo``, ``base``).
-        language: ISO-639-1 language code, or ``None``-equivalent for autodetect
-            (whisper accepts an empty string or a real code).
-        output_dir: Directory to write transcript files into. Created if missing.
+        language: ISO-639-1 language code; pass an empty string to let
+            Whisper autodetect.
+        output_dir: Directory to write transcript files into. Created if
+            missing. Formats are written one at a time, so a failure partway
+            can leave earlier formats on disk.
         output_formats: Iterable of formats to write. Each must be one of
             :data:`OUTPUT_FORMATS`.
 

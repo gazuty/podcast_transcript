@@ -12,9 +12,11 @@ Later layers override earlier ones on key conflicts.
 
 The user file is the destination for ``podcast-transcript add-correction``,
 so it gets rewritten whenever the user discovers a new mistranscription.
-:func:`upsert_correction` does an in-place write that preserves existing
-entries but does not preserve hand-written comments — comments belong in
-the bundled packs, not the user file.
+:func:`upsert_correction` rewrites the file atomically (temp file +
+rename) from the two parsed tables. The file is therefore *owned* by the
+tool: existing entries are preserved, but hand-written comments and any
+unrecognised tables are dropped on the next write — those belong in the
+bundled packs or an explicit ``--corrections`` file, not the user file.
 """
 
 from __future__ import annotations
@@ -133,5 +135,9 @@ def upsert_correction(
         existing.corrections[wrong] = right
         existing.uncertain.pop(wrong, None)
 
-    target.write_text(_serialize(existing), encoding="utf-8")
+    # Temp + rename so a crash mid-write can't truncate the user's
+    # accumulated corrections.
+    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    tmp_path.write_text(_serialize(existing), encoding="utf-8")
+    tmp_path.replace(target)
     return target

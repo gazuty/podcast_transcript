@@ -1,5 +1,8 @@
 # podcast_transcript
 
+[![CI](https://github.com/gazuty/podcast_transcript/actions/workflows/ci.yml/badge.svg)](https://github.com/gazuty/podcast_transcript/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Local-only podcast download, transcription, and transcript cleanup for Apple
 Silicon Macs, using [OpenAI Whisper](https://github.com/openai/whisper).
 
@@ -58,7 +61,9 @@ podcast-transcript run \
 
 Pass `--no-discover-transcript` to skip the publisher-transcript step and
 always run Whisper (useful when the publisher's transcript is known to be
-worse than what local Whisper produces).
+worse than what local Whisper produces). If a declared transcript turns out
+to be unusable — a dead link, or a page that isn't really SRT/VTT — `run`
+logs a warning and falls back to download + Whisper instead of failing.
 
 Outputs are written to `./transcripts/` in five formats: `.txt`, `.srt`,
 `.vtt`, `.tsv`, `.json` when Whisper runs. `clean` and `run` additionally
@@ -115,6 +120,8 @@ podcast-transcript run (--url URL
 ```
 
 Defaults: `--model large-v3`, `--language en`, `--output-dir transcripts`.
+`clean` writes to `<stem>.clean<ext>` next to the input (`foo.txt` →
+`foo.clean.txt`) unless `--output` or `--in-place` says otherwise.
 
 For autodetect language, pass `--language ""`. For a faster (less accurate)
 model, pass `--model turbo`.
@@ -155,8 +162,8 @@ podcast-transcript add-correction "Razeeb" "Razib"            # confident
 podcast-transcript add-correction "benorephora" --uncertain   # flag-only
 ```
 
-The user file is rewritten in place by `add-correction` and is not intended
-for hand-edited comments — keep prose docs in the bundled packs.
+The user file is rewritten (atomically) by `add-correction` and is not
+intended for hand-edited comments — keep prose docs in the bundled packs.
 
 ## How it works
 
@@ -184,6 +191,13 @@ simpler so text extraction is more robust. `application/x-subrip` and
 `text/srt` are treated as synonyms for `application/srt`.
 
 First run downloads Whisper model weights to `~/.cache/whisper/`.
+
+## Security
+
+Every network fetch validates URL schemes, caps response sizes during the
+read, refuses redirects to private/loopback/link-local addresses, and
+rejects XML containing DTDs. See [SECURITY.md](SECURITY.md) for the threat
+model, what is and isn't defended, and how to report an issue.
 
 ## Development
 
@@ -237,13 +251,22 @@ Optional extras:
 │           ├── corrections.toml             # general defaults
 │           └── corrections.razib_khan.toml  # podcast-specific pack
 ├── podcast-library/          # structured archive (see its own README)
-│   ├── audio/                # gitignored
-│   ├── transcripts/<slug>/<id>.txt
-│   ├── summaries/<slug>/<id>.md  (+ <id>.qc.md)
-│   ├── index/                # episodes.jsonl + by-*.md + vocab/
+│   ├── audio/                # local-only, gitignored
+│   ├── transcripts/<slug>/<id>.txt       # local-only, gitignored
+│   ├── summaries/<slug>/<id>.md          # local-only, gitignored (+ <id>.qc.md)
+│   ├── index/                # local-only, gitignored (episodes.jsonl + by-*.md + vocab/)
 │   └── scripts/              # ingest.py, summarise.py, qc_summary.py, rebuild_indexes.py
 ├── tests/                    # pytest unit tests (mock whisper + anthropic, in-process HTTP server)
 ├── scripts/
 │   └── setup.sh              # brew + venv bootstrap
 └── .github/workflows/ci.yml  # lint, type-check, test, shellcheck
 ```
+
+The `podcast-library/` data tree (transcripts, summaries, index) is
+deliberately untracked: it reproduces third-party podcast content, which
+belongs on your disk, not in a public repo. The tooling regenerates it
+from scratch.
+
+## License
+
+[MIT](LICENSE).
