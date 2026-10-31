@@ -12,9 +12,19 @@ Design notes:
 - **Transcript cached as a ``system`` block.** Both the summary and the
   separate QC call (see :mod:`.qc`) re-use the same prefix; with the 5-min
   cache TTL the second call lands as a cache read at ~0.1x input price.
-- **Adaptive thinking enabled.** Opus 4.7 only supports
-  ``thinking={"type": "adaptive"}``; ``budget_tokens`` is gone and sampling
-  params (``temperature``/``top_p``/``top_k``) 400 the request.
+- **Adaptive thinking, explicit effort.** Opus 5.5 thinks on every
+  request: ``thinking={"type": "adaptive"}`` is the only accepted config
+  (``disabled`` and ``budget_tokens`` 400), as are sampling params
+  (``temperature``/``top_p``/``top_k``). Its default effort is ``medium``,
+  one level below the ``high`` Opus 4.7 ran at, so ``high`` is sent
+  explicitly (:data:`DEFAULT_EFFORT`).
+- **Refusals fail loudly, with no server-side fallback.** Opus 5.5 can
+  stop with ``stop_reason="refusal"`` (health content — drugs, dosages —
+  is in scope of its classifiers). The ``server-side-fallback`` beta
+  would re-run the request on another model, but ``episodes.jsonl``
+  records the configured model as the summary's author and would then be
+  wrong; a refusal raises :class:`SummariserError` instead, so the ingest
+  fails visibly and can be re-run.
 - **Episode metadata is rendered into the user turn**, not the system
   block, so the cached transcript prefix doesn't get invalidated by
   per-episode strings (title, slug, etc.). This matters because the QC
@@ -35,17 +45,24 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
 __all__ = [
+    "DEFAULT_EFFORT",
     "DEFAULT_MAX_TOKENS",
     "DEFAULT_SUMMARISE_MODEL",
     "AnthropicClientLike",
     "SummariseInput",
     "SummariserError",
+    "check_stop_reason",
     "summarise_transcript",
     "wrap_api_errors",
 ]
 
 
-DEFAULT_SUMMARISE_MODEL: Final[str] = "claude-opus-4-7"
+DEFAULT_SUMMARISE_MODEL: Final[str] = "claude-opus-5-5"
+# Summaries and the QC audit are quality-sensitive (faithfulness, verbatim
+# numbers and names) and run a few times a week, so the deeper ``high`` is
+# worth its tokens; Opus 5.5 would otherwise run at ``medium``. Shared with
+# :mod:`.qc`.
+DEFAULT_EFFORT: Final[str] = "high"
 # Generous ceiling — summaries are typically <2k tokens, but we want
 # headroom for very long episodes plus the optional QC retry's extra
 # context. Streaming is forced (see below) so timeout isn't a concern.
@@ -195,9 +212,9 @@ def _build_system_blocks(transcript: str) -> list[dict[str, Any]]:
 
     The transcript is the longest piece of content in the request and the
     one that's stable across the summarise + QC call pair, so we mark it
-    with ``cache_control`` for prefix caching. Min cacheable prefix on
-    Opus 4.7 is 4096 tokens — short transcripts won't cache, which is
-    fine (no error, just no speedup).
+    with ``cache_control`` for prefix caching. The minimum cacheable
+    prefix is model-dependent (up to 4096 tokens) — short transcripts
+    won't cache, which is fine (no error, just no speedup).
     """
     return [
         {"type": "text", "text": _SYSTEM_INSTRUCTIONS},
@@ -237,12 +254,14 @@ def summarise_transcript(
             model=model,
             max_tokens=max_tokens,
             thinking={"type": "adaptive"},
+            output_config={"effort": DEFAULT_EFFORT},
             system=system_blocks,
             messages=[{"role": "user", "content": user_blocks}],
         ) as stream,
     ):
         final = stream.get_final_message()
 
+    check_stop_reason(final, "summarise")
     text = _concat_text_blocks(final.content)
     if not text.strip():
         raise SummariserError(
@@ -250,6 +269,22 @@ def summarise_transcript(
             f"(stop_reason={getattr(final, 'stop_reason', None)!r})",
         )
     return text
+
+
+def check_stop_reason(message: Any, stage: str) -> None:
+    """Raise :class:`SummariserError` if *message* did not finish normally.
+
+    Checked before any content is read: a refusal may carry partial text,
+    and a ``max_tokens`` stop leaves a truncated summary (or unparseable
+    QC JSON) that would otherwise be written to the library as if whole.
+    """
+    stop_reason = getattr(message, "stop_reason", None)
+    if stop_reason == "refusal":
+        details = getattr(message, "stop_details", None)
+        category = getattr(details, "category", None)
+        raise SummariserError(f"{stage}: the model declined the request (category={category!r})")
+    if stop_reason == "max_tokens":
+        raise SummariserError(f"{stage}: output was cut off at max_tokens; raise the limit")
 
 
 def _concat_text_blocks(blocks: Iterable[Any]) -> str:

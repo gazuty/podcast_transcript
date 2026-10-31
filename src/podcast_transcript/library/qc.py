@@ -37,10 +37,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 
 from .summarise import (
+    DEFAULT_EFFORT,
     DEFAULT_SUMMARISE_MODEL,
     AnthropicClientLike,
     SummariseInput,
     SummariserError,
+    check_stop_reason,
     summarise_transcript,
     wrap_api_errors,
 )
@@ -62,7 +64,7 @@ __all__ = [
 ]
 
 
-DEFAULT_QC_MODEL: Final[str] = "claude-opus-4-7"
+DEFAULT_QC_MODEL: Final[str] = "claude-opus-5-5"
 COVERAGE_CHUNK_COUNT: Final[int] = 10
 COVERAGE_SAMPLE_SIZE: Final[int] = 5
 _MIN_COVERAGE_CHUNK_CHARS: Final[int] = 50
@@ -293,9 +295,16 @@ def qc_summary(
                 },
             ],
             messages=[{"role": "user", "content": user_text}],
-            output_config={"format": {"type": "json_schema", "schema": _QC_SCHEMA}},
+            # Effort explicit for the same reason as the summariser (Opus 5.5
+            # defaults to medium); an audit that misses a hallucination
+            # costs more than the extra tokens.
+            output_config={
+                "effort": DEFAULT_EFFORT,
+                "format": {"type": "json_schema", "schema": _QC_SCHEMA},
+            },
         )
 
+    check_stop_reason(response, "QC")
     raw = _extract_first_text(response.content)
     try:
         data = json.loads(raw)
