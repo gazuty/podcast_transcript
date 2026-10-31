@@ -284,8 +284,11 @@ library root can be relocated per-environment without touching code.
   an unchanged JSONL produces byte-identical output apart from the
   "Generated at" header line).
 - **`summarise.py`** — lazy `import anthropic` so the base package stays
-  zero-dep. Uses Opus 4.7 with **adaptive thinking** and streams the
-  response. The transcript is sent as a **cached system block**
+  zero-dep. Uses Opus 5.5 with **adaptive thinking** at an explicit
+  effort of `high` (its default is `medium`) and streams the response.
+  `stop_reason` is checked before content is read: a `refusal` or
+  `max_tokens` stop raises `SummariserError` (no server-side fallback, so
+  the `model` recorded in `episodes.jsonl` stays the model that wrote it). The transcript is sent as a **cached system block**
   (`cache_control: ephemeral`) so the separate QC call lands as a cache
   read at ~0.1× input price. Per-episode metadata (title, host, guests)
   goes in the user turn, not the system block, so the cached prefix

@@ -41,6 +41,8 @@ from .summarise import (
     AnthropicClientLike,
     SummariseInput,
     SummariserError,
+    check_stop_reason,
+    reasoning_params,
     summarise_transcript,
     wrap_api_errors,
 )
@@ -62,11 +64,15 @@ __all__ = [
 ]
 
 
-DEFAULT_QC_MODEL: Final[str] = "claude-opus-4-7"
+DEFAULT_QC_MODEL: Final[str] = "claude-opus-5-5"
 COVERAGE_CHUNK_COUNT: Final[int] = 10
 COVERAGE_SAMPLE_SIZE: Final[int] = 5
 _MIN_COVERAGE_CHUNK_CHARS: Final[int] = 50
-_QC_MAX_TOKENS: Final[int] = 4000
+# Opus 5.5's always-on thinking shares this budget with the JSON verdict;
+# at effort ``high`` on a long transcript 4000 left too little, and a
+# ``max_tokens`` stop fails the ingest. 16000 stays within the SDK's
+# non-streaming limit, so the call need not stream.
+_QC_MAX_TOKENS: Final[int] = 16000
 
 
 Verdict = Literal["passed", "flagged", "failed"]
@@ -114,6 +120,8 @@ class QCResult:
     report: QCReport
     attempts: int  # 1 on first-pass pass; 2 if retried
     retried: bool
+    # The model that wrote ``summary_md``, recorded in episodes.jsonl.
+    summarise_model: str = DEFAULT_SUMMARISE_MODEL
 
 
 # ---------------------------------------------------------------------------
@@ -279,11 +287,18 @@ def qc_summary(
     coverage_chunks = sample_coverage_chunks(transcript, seed=seed)
     user_text = _render_qc_user_block(summary_md, coverage_chunks)
 
+    # Effort (when the model takes it) sits beside the schema in one
+    # output_config; an audit that misses a hallucination costs more than
+    # the extra tokens of ``high``.
+    reasoning = reasoning_params(model)
+    output_config = {
+        **reasoning.pop("output_config", {}),
+        "format": {"type": "json_schema", "schema": _QC_SCHEMA},
+    }
     with wrap_api_errors("QC"):
         response = client.messages.create(
             model=model,
             max_tokens=_QC_MAX_TOKENS,
-            thinking={"type": "adaptive"},
             system=[
                 {"type": "text", "text": _QC_SYSTEM_INSTRUCTIONS},
                 {
@@ -293,9 +308,11 @@ def qc_summary(
                 },
             ],
             messages=[{"role": "user", "content": user_text}],
-            output_config={"format": {"type": "json_schema", "schema": _QC_SCHEMA}},
+            output_config=output_config,
+            **reasoning,
         )
 
+    check_stop_reason(response, "QC")
     raw = _extract_first_text(response.content)
     try:
         data = json.loads(raw)
@@ -386,7 +403,13 @@ def run_summary_with_qc(
         model=qc_model,
     )
     if report.verdict == "passed":
-        return QCResult(summary_md=summary_md, report=report, attempts=1, retried=False)
+        return QCResult(
+            summary_md=summary_md,
+            report=report,
+            attempts=1,
+            retried=False,
+            summarise_model=summarise_model,
+        )
 
     # Retry once with QC findings attached.
     retry_input = SummariseInput(
@@ -414,6 +437,7 @@ def run_summary_with_qc(
         report=retry_report,
         attempts=2,
         retried=True,
+        summarise_model=summarise_model,
     )
 
 

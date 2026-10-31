@@ -68,9 +68,9 @@ Every ingest:
 
 1. Resolves the episode and produces a transcript (reusing `run_pipeline`
    from the main package, so publisher SRT/VTT is preferred over Whisper).
-2. Sends the transcript to Claude Opus 4.7 for a structured summary
+2. Sends the transcript to Claude Opus 5.5 for a structured summary
    (transcript prompt-cached as a system block).
-3. Runs a separate QC pass — a fresh Opus 4.7 call that sees only the
+3. Runs a separate QC pass — a fresh Opus 5.5 call that sees only the
    transcript and the summary, and produces a verdict (`passed` /
    `flagged` / `failed`) with specific issues.
 4. On `flagged` or `failed`, regenerates the summary once with the QC

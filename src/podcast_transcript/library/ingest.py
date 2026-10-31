@@ -135,6 +135,9 @@ class IngestRequest:
     tags: list[str] = field(default_factory=list)
     series: str | None = None
     series_part: int | None = None
+    # Model for the summary (the QC pass keeps its own default); recorded
+    # in episodes.jsonl as the summary's author.
+    summarise_model: str = DEFAULT_SUMMARISE_MODEL
     episode_number: int | None = None
     duration_seconds: int | None = None
 
@@ -198,7 +201,12 @@ def ingest_episode(
         series_part=request.series_part,
         source_label=transcript_source_label,
     )
-    qc_result = run_summary_with_qc(client, summarise_input, seed=episode_id)
+    qc_result = run_summary_with_qc(
+        client,
+        summarise_input,
+        seed=episode_id,
+        summarise_model=request.summarise_model,
+    )
 
     # Write summary + QC report
     summary_dest = paths.summaries_dir / podcast_slug / f"{episode_id}.md"
@@ -286,7 +294,7 @@ def ingest_episode(
         else SummaryRef(
             path=str(summary_dest.relative_to(paths.library_root)),
             generated_at=now,
-            model=DEFAULT_SUMMARISE_MODEL,
+            model=qc_result.summarise_model,
             qc_status=qc_result.report.verdict,
             qc_notes_path=str(qc_dest.relative_to(paths.library_root)),
         ),

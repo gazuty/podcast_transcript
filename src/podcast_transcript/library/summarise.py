@@ -12,9 +12,19 @@ Design notes:
 - **Transcript cached as a ``system`` block.** Both the summary and the
   separate QC call (see :mod:`.qc`) re-use the same prefix; with the 5-min
   cache TTL the second call lands as a cache read at ~0.1x input price.
-- **Adaptive thinking enabled.** Opus 4.7 only supports
-  ``thinking={"type": "adaptive"}``; ``budget_tokens`` is gone and sampling
-  params (``temperature``/``top_p``/``top_k``) 400 the request.
+- **Adaptive thinking, explicit effort.** Opus 5.5 thinks on every
+  request: ``thinking={"type": "adaptive"}`` is the only accepted config
+  (``disabled`` and ``budget_tokens`` 400), as are sampling params
+  (``temperature``/``top_p``/``top_k``). Its default effort is ``medium``,
+  one level below the ``high`` Opus 4.7 ran at, so ``high`` is sent
+  explicitly (:data:`DEFAULT_EFFORT`).
+- **Refusals fail loudly, with no server-side fallback.** Opus 5.5 can
+  stop with ``stop_reason="refusal"`` (health content — drugs, dosages —
+  is in scope of its classifiers). The ``server-side-fallback`` beta
+  would re-run the request on another model, but ``episodes.jsonl``
+  records the configured model as the summary's author and would then be
+  wrong; a refusal raises :class:`SummariserError` instead, so the ingest
+  fails visibly and can be re-run.
 - **Episode metadata is rendered into the user turn**, not the system
   block, so the cached transcript prefix doesn't get invalidated by
   per-episode strings (title, slug, etc.). This matters because the QC
@@ -35,21 +45,36 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
 __all__ = [
+    "DEFAULT_EFFORT",
     "DEFAULT_MAX_TOKENS",
     "DEFAULT_SUMMARISE_MODEL",
     "AnthropicClientLike",
     "SummariseInput",
     "SummariserError",
+    "check_stop_reason",
+    "reasoning_params",
     "summarise_transcript",
     "wrap_api_errors",
 ]
 
 
-DEFAULT_SUMMARISE_MODEL: Final[str] = "claude-opus-4-7"
-# Generous ceiling — summaries are typically <2k tokens, but we want
-# headroom for very long episodes plus the optional QC retry's extra
-# context. Streaming is forced (see below) so timeout isn't a concern.
-DEFAULT_MAX_TOKENS: Final[int] = 8000
+DEFAULT_SUMMARISE_MODEL: Final[str] = "claude-opus-5-5"
+# Summaries and the QC audit are quality-sensitive (faithfulness, verbatim
+# numbers and names) and run a few times a week, so the deeper ``high`` is
+# worth its tokens; Opus 5.5 would otherwise run at ``medium``. Shared with
+# :mod:`.qc`.
+DEFAULT_EFFORT: Final[str] = "high"
+# Thinking is always on for Opus 5.5 and shares this budget with the
+# summary itself (typically <2k tokens); at effort ``high`` on a long
+# episode the thinking can take most of it, and a ``max_tokens`` stop now
+# fails the ingest. 32000 leaves ample room for both. The call streams, so
+# a large ceiling doesn't trip the SDK's non-streaming timeout guard.
+DEFAULT_MAX_TOKENS: Final[int] = 32000
+
+# Stop reasons that mean the output was cut short, not finished.
+_TRUNCATION_STOP_REASONS: Final[frozenset[str]] = frozenset(
+    {"max_tokens", "model_context_window_exceeded"},
+)
 
 
 class SummariserError(RuntimeError):
@@ -195,9 +220,9 @@ def _build_system_blocks(transcript: str) -> list[dict[str, Any]]:
 
     The transcript is the longest piece of content in the request and the
     one that's stable across the summarise + QC call pair, so we mark it
-    with ``cache_control`` for prefix caching. Min cacheable prefix on
-    Opus 4.7 is 4096 tokens — short transcripts won't cache, which is
-    fine (no error, just no speedup).
+    with ``cache_control`` for prefix caching. The minimum cacheable
+    prefix is model-dependent (up to 4096 tokens) — short transcripts
+    won't cache, which is fine (no error, just no speedup).
     """
     return [
         {"type": "text", "text": _SYSTEM_INSTRUCTIONS},
@@ -236,13 +261,14 @@ def summarise_transcript(
         client.messages.stream(
             model=model,
             max_tokens=max_tokens,
-            thinking={"type": "adaptive"},
             system=system_blocks,
             messages=[{"role": "user", "content": user_blocks}],
+            **reasoning_params(model),
         ) as stream,
     ):
         final = stream.get_final_message()
 
+    check_stop_reason(final, "summarise")
     text = _concat_text_blocks(final.content)
     if not text.strip():
         raise SummariserError(
@@ -250,6 +276,74 @@ def summarise_transcript(
             f"(stop_reason={getattr(final, 'stop_reason', None)!r})",
         )
     return text
+
+
+def check_stop_reason(message: Any, stage: str) -> None:
+    """Raise :class:`SummariserError` if *message* did not finish normally.
+
+    Checked before any content is read: a refusal may carry partial text,
+    and a truncated stop (``max_tokens``, or the context window running out
+    mid-answer) leaves a partial summary (or unparseable QC JSON) that
+    would otherwise be written to the library as if whole.
+    """
+    stop_reason = getattr(message, "stop_reason", None)
+    if stop_reason == "refusal":
+        details = getattr(message, "stop_details", None)
+        category = getattr(details, "category", None)
+        raise SummariserError(f"{stage}: the model declined the request (category={category!r})")
+    if stop_reason in _TRUNCATION_STOP_REASONS:
+        raise SummariserError(
+            f"{stage}: output was cut off (stop_reason={stop_reason!r}); "
+            "raise max_tokens or shorten the input",
+        )
+
+
+# First version of each family that accepts ``output_config.effort`` and
+# ``thinking={"type": "adaptive"}``. Older models (Haiku 4.5, Sonnet 4.5)
+# reject both with a 400, so an override to one of them sends neither and
+# runs without thinking. Fable / Mythos accept both at every version.
+_EFFORT_FLOOR: Final[dict[str, tuple[int, int]]] = {
+    "opus": (4, 6),
+    "sonnet": (4, 6),
+    "haiku": (5, 0),
+    "fable": (0, 0),
+    "mythos": (0, 0),
+}
+
+
+def _family_version(model: str) -> tuple[str, tuple[int, int]] | None:
+    """``("opus", (5, 5))`` for ``"claude-opus-5-5"``; None if unparseable.
+
+    Date suffixes (``-20251001``) are skipped, so dated snapshots classify.
+    """
+    parts = model.split("-")
+    if len(parts) < 2 or parts[0] != "claude":
+        return None
+    numbers: list[int] = []
+    for token in parts[2:]:
+        if not (token.isdigit() and len(token) < 8):
+            break
+        numbers.append(int(token))
+    major = numbers[0] if numbers else 0
+    minor = numbers[1] if len(numbers) > 1 else 0
+    return parts[1], (major, minor)
+
+
+def reasoning_params(model: str) -> dict[str, Any]:
+    """Thinking + effort request fields for *model*, or none if it takes neither.
+
+    Adaptive thinking is the only thinking config Opus 5.5 accepts, and
+    effort is explicit because Opus 5.5 defaults to ``medium``. Callers
+    that also send ``output_config.format`` must merge, not overwrite.
+    """
+    parsed = _family_version(model)
+    if parsed is None:
+        return {}
+    family, version = parsed
+    floor = _EFFORT_FLOOR.get(family)
+    if floor is None or version < floor:
+        return {}
+    return {"thinking": {"type": "adaptive"}, "output_config": {"effort": DEFAULT_EFFORT}}
 
 
 def _concat_text_blocks(blocks: Iterable[Any]) -> str:

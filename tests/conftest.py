@@ -108,17 +108,18 @@ class FakeAnthropic:
     """
 
     def __init__(self) -> None:
-        self._stream_queue: list[str] = []
-        self._create_queue: list[str] = []
+        # (response text, stop_reason) pairs, popped FIFO.
+        self._stream_queue: list[tuple[str, str]] = []
+        self._create_queue: list[tuple[str, str]] = []
         self.stream_calls: list[dict[str, Any]] = []
         self.create_calls: list[dict[str, Any]] = []
         self.messages = _FakeMessagesNamespace(self)
 
-    def enqueue_stream(self, response_text: str) -> None:
-        self._stream_queue.append(response_text)
+    def enqueue_stream(self, response_text: str, stop_reason: str = "end_turn") -> None:
+        self._stream_queue.append((response_text, stop_reason))
 
-    def enqueue_create(self, response_text: str) -> None:
-        self._create_queue.append(response_text)
+    def enqueue_create(self, response_text: str, stop_reason: str = "end_turn") -> None:
+        self._create_queue.append((response_text, stop_reason))
 
 
 class _FakeMessagesNamespace:
@@ -131,8 +132,8 @@ class _FakeMessagesNamespace:
                 "FakeAnthropic: .messages.stream() called but no response enqueued",
             )
         self._parent.stream_calls.append(kwargs)
-        text = self._parent._stream_queue.pop(0)
-        return _FakeStreamCtx(_FakeMessage(text))
+        text, stop_reason = self._parent._stream_queue.pop(0)
+        return _FakeStreamCtx(_FakeMessage(text, stop_reason))
 
     def create(self, **kwargs: Any) -> _FakeMessage:
         if not self._parent._create_queue:
@@ -140,8 +141,8 @@ class _FakeMessagesNamespace:
                 "FakeAnthropic: .messages.create() called but no response enqueued",
             )
         self._parent.create_calls.append(kwargs)
-        text = self._parent._create_queue.pop(0)
-        return _FakeMessage(text)
+        text, stop_reason = self._parent._create_queue.pop(0)
+        return _FakeMessage(text, stop_reason)
 
 
 @pytest.fixture

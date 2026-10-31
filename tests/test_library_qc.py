@@ -425,3 +425,138 @@ def test_qc_result_dataclass_carries_retry_state() -> None:
     assert qr.summary_md == "..."
     assert qr.attempts == 1
     assert qr.retried is False
+
+
+# ---------------------------------------------------------------------------
+# Outgoing request shape on claude-opus-5-5 (31 Oct 2026 migration)
+# ---------------------------------------------------------------------------
+
+_SAMPLING_PARAMS = ("temperature", "top_p", "top_k")
+_INP = SummariseInput(
+    transcript="Razib talks about ApoB.",
+    podcast="Show",
+    episode_title="Hello World",
+    pub_date="2026-04-17",
+)
+
+
+def _assert_valid_opus_5_5_request(call: dict[str, object]) -> None:
+    """Opus 5.5 rules: adaptive thinking only, explicit effort, no sampling
+    params, no forced tool choice, no prefill; no fallback (see summarise)."""
+    assert call["model"] == "claude-opus-5-5"
+    assert call["thinking"] == {"type": "adaptive"}
+    output_config = call["output_config"]
+    assert isinstance(output_config, dict)
+    assert output_config["effort"] == "high"
+    assert not any(p in call for p in _SAMPLING_PARAMS)
+    assert "tool_choice" not in call
+    assert "extra_body" not in call
+    assert "betas" not in call
+    messages = call["messages"]
+    assert isinstance(messages, list)
+    assert [m["role"] for m in messages] == ["user"]
+
+
+def test_defaults_are_opus_5_5() -> None:
+    from podcast_transcript.library.qc import DEFAULT_QC_MODEL
+    from podcast_transcript.library.summarise import DEFAULT_SUMMARISE_MODEL
+
+    assert DEFAULT_SUMMARISE_MODEL == "claude-opus-5-5"
+    assert DEFAULT_QC_MODEL == "claude-opus-5-5"
+
+
+def test_summarise_request_is_valid_for_opus_5_5(fake_anthropic: FakeAnthropic) -> None:
+    fake_anthropic.enqueue_stream(SAMPLE_SUMMARY)
+    summarise_transcript(fake_anthropic, _INP)
+    _assert_valid_opus_5_5_request(fake_anthropic.stream_calls[0])
+
+
+def test_qc_request_is_valid_for_opus_5_5(fake_anthropic: FakeAnthropic) -> None:
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "passed", "issues": []}))
+    qc_summary(fake_anthropic, transcript=_INP.transcript, summary_md=SAMPLE_SUMMARY, seed="e")
+    call = fake_anthropic.create_calls[0]
+    _assert_valid_opus_5_5_request(call)
+    # Effort sits beside the structured-output format, not in place of it.
+    assert call["output_config"]["format"]["type"] == "json_schema"
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "match"), [("refusal", "declined"), ("max_tokens", "cut off")]
+)
+def test_summarise_checks_stop_reason_before_reading_text(
+    fake_anthropic: FakeAnthropic, stop_reason: str, match: str
+) -> None:
+    # Partial text must not be returned as if it were a whole summary.
+    fake_anthropic.enqueue_stream("# Hello World\n\nPartial", stop_reason=stop_reason)
+    with pytest.raises(SummariserError, match=match):
+        summarise_transcript(fake_anthropic, _INP)
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "match"), [("refusal", "declined"), ("max_tokens", "cut off")]
+)
+def test_qc_checks_stop_reason_before_parsing(
+    fake_anthropic: FakeAnthropic, stop_reason: str, match: str
+) -> None:
+    # A passing verdict on a stopped response must not be trusted.
+    fake_anthropic.enqueue_create(
+        json.dumps({"verdict": "passed", "issues": []}), stop_reason=stop_reason
+    )
+    with pytest.raises(SummariserError, match=f"QC: .*{match}"):
+        qc_summary(fake_anthropic, transcript=_INP.transcript, summary_md=SAMPLE_SUMMARY, seed="e")
+
+
+def test_token_budgets_leave_room_for_always_on_thinking() -> None:
+    from podcast_transcript.library import qc, summarise
+
+    # Thinking at effort high shares max_tokens with the answer, and a
+    # max_tokens stop now fails the ingest: pin the budgets.
+    assert summarise.DEFAULT_MAX_TOKENS == 32000
+    assert qc._QC_MAX_TOKENS == 16000
+
+
+def test_requests_send_the_pinned_budgets(fake_anthropic: FakeAnthropic) -> None:
+    fake_anthropic.enqueue_stream(SAMPLE_SUMMARY)
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "passed", "issues": []}))
+    summarise_transcript(fake_anthropic, _INP)
+    qc_summary(fake_anthropic, transcript=_INP.transcript, summary_md=SAMPLE_SUMMARY, seed="e")
+    assert fake_anthropic.stream_calls[0]["max_tokens"] == 32000
+    assert fake_anthropic.create_calls[0]["max_tokens"] == 16000
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-sonnet-4-5-20250929"])
+def test_models_without_effort_get_no_thinking_or_effort(
+    fake_anthropic: FakeAnthropic, model: str
+) -> None:
+    # Haiku 4.5 / Sonnet 4.5 400 on output_config.effort and adaptive thinking.
+    fake_anthropic.enqueue_stream(SAMPLE_SUMMARY)
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "passed", "issues": []}))
+    summarise_transcript(fake_anthropic, _INP, model=model)
+    qc_summary(
+        fake_anthropic,
+        transcript=_INP.transcript,
+        summary_md=SAMPLE_SUMMARY,
+        seed="e",
+        model=model,
+    )
+    stream_call = fake_anthropic.stream_calls[0]
+    assert "thinking" not in stream_call
+    assert "output_config" not in stream_call
+    create_call = fake_anthropic.create_calls[0]
+    assert "thinking" not in create_call
+    assert set(create_call["output_config"]) == {"format"}
+
+
+def test_context_window_stop_is_treated_as_truncation(fake_anthropic: FakeAnthropic) -> None:
+    fake_anthropic.enqueue_stream("# Partial", stop_reason="model_context_window_exceeded")
+    with pytest.raises(SummariserError, match="cut off"):
+        summarise_transcript(fake_anthropic, _INP)
+
+
+def test_run_summary_with_qc_reports_the_summary_model(fake_anthropic: FakeAnthropic) -> None:
+    fake_anthropic.enqueue_stream(SAMPLE_SUMMARY)
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "passed", "issues": []}))
+    result = run_summary_with_qc(
+        fake_anthropic, _INP, seed="e", summarise_model="claude-sonnet-5-5"
+    )
+    assert result.summarise_model == "claude-sonnet-5-5"
