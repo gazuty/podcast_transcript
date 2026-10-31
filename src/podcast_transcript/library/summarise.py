@@ -52,6 +52,7 @@ __all__ = [
     "SummariseInput",
     "SummariserError",
     "check_stop_reason",
+    "reasoning_params",
     "summarise_transcript",
     "wrap_api_errors",
 ]
@@ -63,10 +64,17 @@ DEFAULT_SUMMARISE_MODEL: Final[str] = "claude-opus-5-5"
 # worth its tokens; Opus 5.5 would otherwise run at ``medium``. Shared with
 # :mod:`.qc`.
 DEFAULT_EFFORT: Final[str] = "high"
-# Generous ceiling — summaries are typically <2k tokens, but we want
-# headroom for very long episodes plus the optional QC retry's extra
-# context. Streaming is forced (see below) so timeout isn't a concern.
-DEFAULT_MAX_TOKENS: Final[int] = 8000
+# Thinking is always on for Opus 5.5 and shares this budget with the
+# summary itself (typically <2k tokens); at effort ``high`` on a long
+# episode the thinking can take most of it, and a ``max_tokens`` stop now
+# fails the ingest. 32000 leaves ample room for both. The call streams, so
+# a large ceiling doesn't trip the SDK's non-streaming timeout guard.
+DEFAULT_MAX_TOKENS: Final[int] = 32000
+
+# Stop reasons that mean the output was cut short, not finished.
+_TRUNCATION_STOP_REASONS: Final[frozenset[str]] = frozenset(
+    {"max_tokens", "model_context_window_exceeded"},
+)
 
 
 class SummariserError(RuntimeError):
@@ -253,10 +261,9 @@ def summarise_transcript(
         client.messages.stream(
             model=model,
             max_tokens=max_tokens,
-            thinking={"type": "adaptive"},
-            output_config={"effort": DEFAULT_EFFORT},
             system=system_blocks,
             messages=[{"role": "user", "content": user_blocks}],
+            **reasoning_params(model),
         ) as stream,
     ):
         final = stream.get_final_message()
@@ -275,16 +282,68 @@ def check_stop_reason(message: Any, stage: str) -> None:
     """Raise :class:`SummariserError` if *message* did not finish normally.
 
     Checked before any content is read: a refusal may carry partial text,
-    and a ``max_tokens`` stop leaves a truncated summary (or unparseable
-    QC JSON) that would otherwise be written to the library as if whole.
+    and a truncated stop (``max_tokens``, or the context window running out
+    mid-answer) leaves a partial summary (or unparseable QC JSON) that
+    would otherwise be written to the library as if whole.
     """
     stop_reason = getattr(message, "stop_reason", None)
     if stop_reason == "refusal":
         details = getattr(message, "stop_details", None)
         category = getattr(details, "category", None)
         raise SummariserError(f"{stage}: the model declined the request (category={category!r})")
-    if stop_reason == "max_tokens":
-        raise SummariserError(f"{stage}: output was cut off at max_tokens; raise the limit")
+    if stop_reason in _TRUNCATION_STOP_REASONS:
+        raise SummariserError(
+            f"{stage}: output was cut off (stop_reason={stop_reason!r}); "
+            "raise max_tokens or shorten the input",
+        )
+
+
+# First version of each family that accepts ``output_config.effort`` and
+# ``thinking={"type": "adaptive"}``. Older models (Haiku 4.5, Sonnet 4.5)
+# reject both with a 400, so an override to one of them sends neither and
+# runs without thinking. Fable / Mythos accept both at every version.
+_EFFORT_FLOOR: Final[dict[str, tuple[int, int]]] = {
+    "opus": (4, 6),
+    "sonnet": (4, 6),
+    "haiku": (5, 0),
+    "fable": (0, 0),
+    "mythos": (0, 0),
+}
+
+
+def _family_version(model: str) -> tuple[str, tuple[int, int]] | None:
+    """``("opus", (5, 5))`` for ``"claude-opus-5-5"``; None if unparseable.
+
+    Date suffixes (``-20251001``) are skipped, so dated snapshots classify.
+    """
+    parts = model.split("-")
+    if len(parts) < 2 or parts[0] != "claude":
+        return None
+    numbers: list[int] = []
+    for token in parts[2:]:
+        if not (token.isdigit() and len(token) < 8):
+            break
+        numbers.append(int(token))
+    major = numbers[0] if numbers else 0
+    minor = numbers[1] if len(numbers) > 1 else 0
+    return parts[1], (major, minor)
+
+
+def reasoning_params(model: str) -> dict[str, Any]:
+    """Thinking + effort request fields for *model*, or none if it takes neither.
+
+    Adaptive thinking is the only thinking config Opus 5.5 accepts, and
+    effort is explicit because Opus 5.5 defaults to ``medium``. Callers
+    that also send ``output_config.format`` must merge, not overwrite.
+    """
+    parsed = _family_version(model)
+    if parsed is None:
+        return {}
+    family, version = parsed
+    floor = _EFFORT_FLOOR.get(family)
+    if floor is None or version < floor:
+        return {}
+    return {"thinking": {"type": "adaptive"}, "output_config": {"effort": DEFAULT_EFFORT}}
 
 
 def _concat_text_blocks(blocks: Iterable[Any]) -> str:

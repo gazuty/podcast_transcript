@@ -504,3 +504,59 @@ def test_qc_checks_stop_reason_before_parsing(
     )
     with pytest.raises(SummariserError, match=f"QC: .*{match}"):
         qc_summary(fake_anthropic, transcript=_INP.transcript, summary_md=SAMPLE_SUMMARY, seed="e")
+
+
+def test_token_budgets_leave_room_for_always_on_thinking() -> None:
+    from podcast_transcript.library import qc, summarise
+
+    # Thinking at effort high shares max_tokens with the answer, and a
+    # max_tokens stop now fails the ingest: pin the budgets.
+    assert summarise.DEFAULT_MAX_TOKENS == 32000
+    assert qc._QC_MAX_TOKENS == 16000
+
+
+def test_requests_send_the_pinned_budgets(fake_anthropic: FakeAnthropic) -> None:
+    fake_anthropic.enqueue_stream(SAMPLE_SUMMARY)
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "passed", "issues": []}))
+    summarise_transcript(fake_anthropic, _INP)
+    qc_summary(fake_anthropic, transcript=_INP.transcript, summary_md=SAMPLE_SUMMARY, seed="e")
+    assert fake_anthropic.stream_calls[0]["max_tokens"] == 32000
+    assert fake_anthropic.create_calls[0]["max_tokens"] == 16000
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-sonnet-4-5-20250929"])
+def test_models_without_effort_get_no_thinking_or_effort(
+    fake_anthropic: FakeAnthropic, model: str
+) -> None:
+    # Haiku 4.5 / Sonnet 4.5 400 on output_config.effort and adaptive thinking.
+    fake_anthropic.enqueue_stream(SAMPLE_SUMMARY)
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "passed", "issues": []}))
+    summarise_transcript(fake_anthropic, _INP, model=model)
+    qc_summary(
+        fake_anthropic,
+        transcript=_INP.transcript,
+        summary_md=SAMPLE_SUMMARY,
+        seed="e",
+        model=model,
+    )
+    stream_call = fake_anthropic.stream_calls[0]
+    assert "thinking" not in stream_call
+    assert "output_config" not in stream_call
+    create_call = fake_anthropic.create_calls[0]
+    assert "thinking" not in create_call
+    assert set(create_call["output_config"]) == {"format"}
+
+
+def test_context_window_stop_is_treated_as_truncation(fake_anthropic: FakeAnthropic) -> None:
+    fake_anthropic.enqueue_stream("# Partial", stop_reason="model_context_window_exceeded")
+    with pytest.raises(SummariserError, match="cut off"):
+        summarise_transcript(fake_anthropic, _INP)
+
+
+def test_run_summary_with_qc_reports_the_summary_model(fake_anthropic: FakeAnthropic) -> None:
+    fake_anthropic.enqueue_stream(SAMPLE_SUMMARY)
+    fake_anthropic.enqueue_create(json.dumps({"verdict": "passed", "issues": []}))
+    result = run_summary_with_qc(
+        fake_anthropic, _INP, seed="e", summarise_model="claude-sonnet-5-5"
+    )
+    assert result.summarise_model == "claude-sonnet-5-5"

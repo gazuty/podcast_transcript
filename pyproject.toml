@@ -36,7 +36,9 @@ whisper = [
 # `podcast_transcript.library.summarise` / `.qc`, so the base package
 # stays zero-dep at runtime.
 summarise = [
-    "anthropic>=0.50",
+    # 0.78.0 is the first release that types output_config.effort and
+    # adaptive thinking on messages.create/stream.
+    "anthropic>=0.78.0",
 ]
 dev = [
     "pytest>=8.0",
