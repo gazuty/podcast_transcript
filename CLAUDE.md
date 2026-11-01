@@ -288,12 +288,13 @@ library root can be relocated per-environment without touching code.
   effort of `high` (its default is `medium`) and streams the response.
   `stop_reason` is checked before content is read: a `refusal` or
   `max_tokens` stop raises `SummariserError` (no server-side fallback, so
-  the `model` recorded in `episodes.jsonl` stays the model that wrote it).
+  the summary model recorded in `episodes.jsonl` stays the model that
+  wrote it).
   Budgets are sized for always-on thinking: `max_tokens` 32000 for the
   summary, 16000 for QC. The transcript is sent as a **cached system block**
   (`cache_control: ephemeral`) after the summariser's instructions, so a
-  regeneration after QC reads it from cache (~0.05× input price on Opus
-  5.5). The QC call does not share that prefix: its own instruction block
+  regeneration after QC within the 5-minute cache TTL reads it from cache
+  (~0.05× input price on Opus 5.5). The QC call does not share that prefix: its own instruction block
   comes first, so it writes a separate cache entry (see Known not-done
   items). Per-episode metadata (title, host, guests)
   goes in the user turn, not the system block, so the cached prefix
@@ -387,14 +388,15 @@ automatically.
 - No release/publishing pipeline. The package isn't on PyPI; install is local
   via `pip install -e`.
 - (2026-11-01) anthropic SDK 2.x review. The `summarise` extra is
-  `anthropic>=0.78.0` with no upper bound and the repo has no Dependabot, so
-  a fresh install takes 2.x as soon as it is released. 2.x sends API
-  version 2026-10-21, which returns 400 on `temperature` / `top_p` /
+  `anthropic>=0.78.0` with no upper bound and the repo has no Dependabot.
+  2.x is already released, so a fresh `pip install -e '.[summarise]'` takes
+  it today. 2.x sends API version 2026-10-21, which returns 400 on `temperature` / `top_p` /
   `top_k` for every model. The summariser and QC send none of these today,
   so the upgrade is likely only the version bump; check the request
   shapes again before relying on it (see gazuty/dc-regwatch#98).
-- (2026-11-01) The `model` values in `podcast-library/index/episodes.jsonl`
-  written before PR #1 (five rows of `claude-opus-4-7`) are historical:
+- (2026-11-01) The summary model values (`summary.model`) in
+  `podcast-library/index/episodes.jsonl` written before PR #1 (five rows of
+  `claude-opus-4-7`) are historical:
   they name the model that wrote those summaries and are intentionally
   left unchanged. A re-ingest records the model actually used.
 - (2026-11-01) The QC call does not reuse the summariser's cached
