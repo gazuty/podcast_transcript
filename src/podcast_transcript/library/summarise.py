@@ -218,9 +218,10 @@ def _build_user_blocks(inp: SummariseInput) -> list[dict[str, Any]]:
 def _build_system_blocks(transcript: str) -> list[dict[str, Any]]:
     """System turn = instructions + the cacheable transcript block.
 
-    The transcript is the longest piece of content in the request and the
-    one that's stable across the summarise + QC call pair, so we mark it
-    with ``cache_control`` for prefix caching. The minimum cacheable
+    The transcript is the longest piece of content in the request and is
+    stable across a summary and its regeneration, so we mark it with
+    ``cache_control`` for prefix caching. The QC call puts its own
+    instructions first, so it does not read this cache entry. The minimum cacheable
     prefix is model-dependent (up to 4096 tokens) — short transcripts
     won't cache, which is fine (no error, just no speedup).
     """
